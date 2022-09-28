@@ -1,0 +1,45 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: bitwarden-secrets-operator
+spec:
+  resources:
+    requests:
+      storage: 10Mi
+  volumeMode: Filesystem
+  accessModes:
+    - ReadWriteOnce
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bitwarden-secrets-operator
+  labels:
+    name: bitwarden-secrets-operator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: bitwarden-secrets-operator
+  template:
+    metadata:
+      labels:
+        app: bitwarden-secrets-operator
+    spec:
+      containers:
+        - image: ghcr.io/jrcichra/bitwarden-secrets-operator
+          name: bitwarden-secrets-operator
+          resources:
+            requests:
+              cpu: "20m"
+              memory: "100Mi"
+            limits:
+              cpu: "200m"
+              memory: "100Mi"
+          volumeMounts:
+            - mountPath: /root/.config/Bitwarden CLI
+              name: bitwarden
+      volumes:
+        - name: bitwarden
+          persistentVolumeClaim:
+            claimName: bitwarden-secrets-operator

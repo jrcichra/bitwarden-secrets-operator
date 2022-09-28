@@ -1,0 +1,6 @@
+target/
+deploy/
+.vscode/
+README.md
+Dockerfile
+.gitignore
