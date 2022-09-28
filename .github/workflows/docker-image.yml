@@ -59,6 +59,8 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.prep.outputs.tags }}
+          cache-from: type=registry,ref=ghcr.io/jrcichra/bitwarden-secrets-operator:buildcache
+          cache-to: type=registry,ref=ghcr.io/jrcichra/bitwarden-secrets-operator:buildcache,mode=max
           labels: |
             org.opencontainers.image.title=${{ fromJson(steps.repo.outputs.result).name }}
             org.opencontainers.image.description=${{ fromJson(steps.repo.outputs.result).description }}
