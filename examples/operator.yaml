@@ -28,6 +28,9 @@ spec:
     spec:
       containers:
         - image: ghcr.io/jrcichra/bitwarden-secrets-operator
+          # Use this to login to bitwarden for the first time
+          # command: ["tail"]
+          # args: ["-f", "/dev/null"]
           name: bitwarden-secrets-operator
           resources:
             requests:
@@ -39,6 +42,7 @@ spec:
           volumeMounts:
             - mountPath: /root/.config/Bitwarden CLI
               name: bitwarden
+          imagePullPolicy: Always
       volumes:
         - name: bitwarden
           persistentVolumeClaim:
