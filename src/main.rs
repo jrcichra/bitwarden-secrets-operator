@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::error::Error;
+use std::fs;
+use std::net::SocketAddr;
 use std::process::Command;
 use std::{collections::BTreeMap, sync::Arc};
 use thiserror::Error;
@@ -114,17 +116,11 @@ fn get_secrets(
 }
 
 fn get_session() -> String {
-    let res = Command::new("bw")
-        .arg("unlock")
-        .arg("--raw")
-        .output()
-        .unwrap();
-    let stdout = String::from_utf8_lossy(&res.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&res.stderr).to_string();
-    if res.status.success() {
-        return stdout;
-    }
-    panic!("{}", format!("stdout: {}\nstderr: {}", stdout, stderr));
+    String::from(
+        fs::read_to_string("/root/.config/Bitwarden CLI/session")
+            .unwrap()
+            .trim(),
+    )
 }
 
 /// Controller triggers this whenever our main object or our children changed
