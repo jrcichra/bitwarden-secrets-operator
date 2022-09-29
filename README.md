@@ -6,9 +6,9 @@ In other words, you can reference Bitwarden passwords from Kubernetes natively t
 
 # Usage
 
-See `examples/operator.yaml`. You'll want to first run it with `tail -f /dev/null`, exec in, and run `bw login`. `echo -n` the token into `/root/.config/Bitwarden CLI/session`.
+See `examples/operator.yaml` but change the `volume` to meet your needs.
 
-The example uses a PVC with `ReadWriteOnce` but if your storage class supports it, you can change that to `ReadWriteMany` and up the replica count. There's currently no leader election, but that should be OK.
+You'll want to first run it with `tail -f /dev/null`, exec in, and run `bw login`. `echo -n` the token into `/root/.config/Bitwarden CLI/session`. I'm thinking of ways to make this better.
 
 # Disclaimer
 

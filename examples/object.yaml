@@ -12,9 +12,4 @@ metadata:
 spec:
   name: secret-note
 ---
-apiVersion: jrcichra.dev/v1
-kind: BitwardenSecret
-metadata:
-  name: doesnt-exist
-spec:
-  name: doesnt-exist
+
