@@ -3,10 +3,10 @@ WORKDIR /app
 RUN cargo init
 COPY Cargo.toml Cargo.lock /app/
 RUN cargo build --release
-COPY src/main.rs /app/src/main.rs
-RUN touch src/main.rs && cargo build --release
+COPY src/ /app/src/
+RUN find src/ -type f -exec touch {} + && cargo build --release
 
-FROM node:18.9.1-bullseye
+FROM node:18.9.1-bullseye-slim
 WORKDIR /app
 RUN npm install -g @bitwarden/cli
 COPY --from=builder /app/target/release/bitwarden-secrets-operator /app/
