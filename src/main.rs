@@ -41,9 +41,10 @@ async fn rocket() -> _ {
     //     serde_yaml::to_string(&BitwardenSecret::crd())?,
     // )?;
 
-    info!("starting bitwarden-secretes-operator");
-    bitwarden::run(client, config).await.unwrap();
-    // serve prometheus metrics
-    info!("starting rocket web server");
+    info!("starting bitwarden-secretes-operator...");
+    tokio::spawn(async move {
+        bitwarden::run(client, config).await.unwrap();
+    });
+    info!("starting metrics http server...");
     rocket::build().mount("/", routes![prometheus::gather_metrics])
 }
