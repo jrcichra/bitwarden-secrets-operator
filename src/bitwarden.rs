@@ -54,10 +54,6 @@ async fn reconcile(
     let name = &generator.spec.name;
     let mut contents = BTreeMap::new();
 
-    // let prometheus know we started the reconcile loop
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-    prometheus::LAST_SUCCESSFUL_RECONCILE.set(now.as_secs().try_into().unwrap());
-
     // build the content for the secret here
     match get_secrets(&session, &config.folder) {
         Ok(secrets) => match secrets.get(name) {
@@ -128,6 +124,11 @@ async fn reconcile(
         )
         .await
         .map_err(ReconcileError::SecretCreationFailed)?;
+
+    // let prometheus know we started the reconcile loop
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+    prometheus::LAST_SUCCESSFUL_RECONCILE.set(now.as_secs().try_into().unwrap());
+
     Ok(Action::requeue(Duration::from_secs(300)))
 }
 
