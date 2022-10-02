@@ -42,11 +42,8 @@ async fn rocket() -> _ {
     // )?;
 
     info!("starting bitwarden-secretes-operator");
-    tokio::spawn(async move {
-        bitwarden::run(client, config).await.unwrap();
-    });
-    info!("controller terminated");
-
+    bitwarden::run(client, config).await.unwrap();
     // serve prometheus metrics
+    info!("starting rocket web server");
     rocket::build().mount("/", routes![prometheus::gather_metrics])
 }
