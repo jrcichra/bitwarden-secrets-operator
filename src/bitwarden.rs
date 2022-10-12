@@ -30,7 +30,6 @@ struct BitwardenSecretSpec {
 struct Data {
     client: Client,
     config: Configuration,
-    session: String,
 }
 
 #[derive(Debug, Error)]
@@ -50,9 +49,11 @@ async fn reconcile(
 ) -> Result<Action, ReconcileError> {
     let client = &ctx.client;
     let config = &ctx.config;
-    let session = &ctx.session;
     let name = &generator.spec.name;
     let mut contents = BTreeMap::new();
+
+    // get the session id every reconcile loop
+    let session = get_session();
 
     // build the content for the secret here
     match get_secrets(&session, &config.folder) {
@@ -229,22 +230,11 @@ pub async fn run(client: Client, config: Configuration) -> Result<(), Box<dyn Er
         }
     });
 
-    // get the session id
-    let session = get_session();
-
     Controller::new(cmgs, ListParams::default())
         .owns(cms, ListParams::default())
         .reconcile_all_on(reload_rx.map(|_| ()))
         .shutdown_on_signal()
-        .run(
-            reconcile,
-            error_policy,
-            Arc::new(Data {
-                client,
-                config,
-                session,
-            }),
-        )
+        .run(reconcile, error_policy, Arc::new(Data { client, config }))
         .for_each(|res| async move {
             match res {
                 Ok(o) => info!("reconciled {:?}", o),
