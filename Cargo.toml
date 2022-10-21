@@ -9,7 +9,7 @@ edition = "2021"
 anyhow = "1.0.66"
 dirs = "4.0.0"
 envy = "0.4.2"
-futures = "0.3.24"
+futures = "0.3.25"
 k8s-openapi = { version = "0.16.0", features = ["v1_25"] }
 kube = { version = "0.75.0", features = ["runtime","derive"] }
 lazy_static = "1.4.0"
