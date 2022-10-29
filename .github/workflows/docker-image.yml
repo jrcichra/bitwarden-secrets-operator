@@ -54,6 +54,9 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - uses: docker/build-push-action@v3
         with:
+          config-inline: |
+            [worker.oci]
+              max-parallelism = 1
           context: .
           file: ./Dockerfile
           platforms: linux/amd64,linux/arm64
