@@ -4,7 +4,7 @@ WORKDIR /app
 ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
 RUN cargo init
 COPY Cargo.toml Cargo.lock src/ /app/
-RUN cargo build --release --verbose
+RUN cargo build --release
 
 FROM node:19.0.0-bullseye-slim
 WORKDIR /app
