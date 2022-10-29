@@ -1,5 +1,7 @@
 FROM rust:1.64.0-bullseye as builder
 WORKDIR /app
+# https://users.rust-lang.org/t/cargo-uses-too-much-memory-being-run-in-qemu/76531
+ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
 RUN cargo init
 COPY Cargo.toml Cargo.lock src/ /app/
 RUN cargo build --release --verbose
