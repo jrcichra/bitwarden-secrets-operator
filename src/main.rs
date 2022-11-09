@@ -8,16 +8,22 @@ use serde::Deserialize;
 pub struct Configuration {
     #[serde(default = "default_folder")]
     folder: String,
-    #[serde(default = "default_interval")]
-    interval: u64,
+    #[serde(default = "default_reconcile_interval")]
+    reconcile_interval: u64,
+    #[serde(default = "default_secret_interval")]
+    secret_interval: u64,
 }
 
 fn default_folder() -> String {
     "kubernetes".to_string()
 }
 
-fn default_interval() -> u64 {
+fn default_reconcile_interval() -> u64 {
     60 * 5
+}
+
+fn default_secret_interval() -> u64 {
+    60 * 2
 }
 
 // fn write_file(path: String, content: String) -> std::io::Result<()> {

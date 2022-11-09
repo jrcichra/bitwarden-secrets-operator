@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::error::Error;
 use std::fs;
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
@@ -29,7 +29,7 @@ struct BitwardenSecretSpec {
 // Data we want access to in error/reconcile calls
 struct Data {
     client: Client,
-    config: Configuration,
+    cache: Arc<Mutex<HashMap<String, serde_json::Value>>>,
 }
 
 #[derive(Debug, Error)]
@@ -48,50 +48,40 @@ async fn reconcile(
     ctx: Arc<Data>,
 ) -> Result<Action, ReconcileError> {
     let client = &ctx.client;
-    let config = &ctx.config;
     let name = &generator.spec.name;
     let mut contents = BTreeMap::new();
-
-    // get the session id every reconcile loop
-    let session = get_session();
-
     // build the content for the secret here
-    match get_secrets(&session, &config.folder) {
-        Ok(secrets) => match secrets.get(name) {
-            Some(value) => match value.get("login") {
-                Some(login) => {
-                    // set the username and password keys
-                    contents.insert(
-                        "username".to_string(),
-                        String::from(login["username"].as_str().unwrap()),
-                    );
-                    contents.insert(
-                        "password".to_string(),
-                        String::from(login["password"].as_str().unwrap()),
-                    );
-                }
-                None => match value.get("notes") {
-                    Some(notes) => {
-                        // set it with key "notes"
-                        contents.insert("notes".to_string(), String::from(notes.as_str().unwrap()));
-                    }
-                    None => {
-                        return Err(ReconcileError::BitwardenError(format!(
-                            "card/login not found for {}",
-                            name
-                        )));
-                    }
-                },
-            },
-            None => {
-                return Err(ReconcileError::BitwardenError(format!(
-                    "{} not found",
-                    name
-                )));
+    match ctx.cache.lock().unwrap().get(name) {
+        Some(value) => match value.get("login") {
+            Some(login) => {
+                // set the username and password keys
+                contents.insert(
+                    "username".to_string(),
+                    String::from(login["username"].as_str().unwrap()),
+                );
+                contents.insert(
+                    "password".to_string(),
+                    String::from(login["password"].as_str().unwrap()),
+                );
             }
+            None => match value.get("notes") {
+                Some(notes) => {
+                    // set it with key "notes"
+                    contents.insert("notes".to_string(), String::from(notes.as_str().unwrap()));
+                }
+                None => {
+                    return Err(ReconcileError::BitwardenError(format!(
+                        "card/login not found for {}",
+                        name
+                    )));
+                }
+            },
         },
-        Err(e) => {
-            return Err(ReconcileError::BitwardenError(e.to_string()));
+        None => {
+            return Err(ReconcileError::BitwardenError(format!(
+                "{} not found",
+                name
+            )));
         }
     }
 
@@ -133,6 +123,7 @@ async fn reconcile(
     Ok(Action::requeue(Duration::from_secs(300)))
 }
 
+// collect secrets and return a hash of the results
 fn get_secrets(
     session: &str,
     folder: &str,
@@ -212,29 +203,62 @@ fn get_session() -> String {
 pub async fn run(client: Client, config: Configuration) -> Result<(), Box<dyn Error>> {
     let cmgs = Api::<BitwardenSecret>::all(client.clone());
     let cms = Api::<BitwardenSecret>::all(client.clone());
+    let cache = Arc::new(Mutex::new(HashMap::new()));
 
     let (mut reload_tx, reload_rx) = futures::channel::mpsc::channel(0);
 
     // Reconcile loop timer
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(config.interval));
+        let mut interval = tokio::time::interval(Duration::from_secs(config.reconcile_interval));
         loop {
             interval.tick().await;
             info!(
                 "interval of {} seconds triggering reconcile loop",
-                config.interval
+                config.reconcile_interval
             );
             reload_tx
                 .try_send(())
                 .expect("could not trigger reconcile loop");
         }
     });
+    let cache_gather = Arc::clone(&cache);
+    let folder_clone = config.folder.clone();
+    // Secret Gatherer timer - independent of reconciliation since it grabs all secrets at once
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(config.secret_interval));
+        loop {
+            interval.tick().await;
+            info!(
+                "interval of {} seconds triggering secret gather loop",
+                config.secret_interval
+            );
+            match get_secrets(&get_session(), &folder_clone) {
+                Ok(secrets) => {
+                    // update the cache
+                    cache_gather.lock().unwrap().clone_from(&secrets);
+                }
+                Err(e) => {
+                    warn!("secret gatherer failed {:?}", e)
+                }
+            }
+        }
+    });
+    // run secret grabber once at the start
+    match get_secrets(&get_session(), &config.folder) {
+        Ok(secrets) => {
+            // update the cache
+            cache.lock().unwrap().clone_from(&secrets);
+        }
+        Err(e) => {
+            warn!("secret gatherer failed {:?}", e)
+        }
+    }
 
     Controller::new(cmgs, ListParams::default())
         .owns(cms, ListParams::default())
         .reconcile_all_on(reload_rx.map(|_| ()))
         .shutdown_on_signal()
-        .run(reconcile, error_policy, Arc::new(Data { client, config }))
+        .run(reconcile, error_policy, Arc::new(Data { client, cache }))
         .for_each(|res| async move {
             match res {
                 Ok(o) => info!("reconciled {:?}", o),
