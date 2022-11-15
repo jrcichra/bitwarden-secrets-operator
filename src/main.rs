@@ -2,7 +2,10 @@
 extern crate rocket;
 pub mod bitwarden;
 pub mod prometheus;
-use kube::Client;
+use std::{fs::File, io::Write, process};
+
+use crate::bitwarden::BitwardenSecret;
+use kube::{Client, CustomResourceExt};
 use serde::Deserialize;
 #[derive(Deserialize, Debug)]
 pub struct Configuration {
@@ -12,6 +15,8 @@ pub struct Configuration {
     reconcile_interval: u64,
     #[serde(default = "default_secret_interval")]
     secret_interval: u64,
+    #[serde(default = "default_generate_crd")]
+    generate_crd: bool,
 }
 
 fn default_folder() -> String {
@@ -26,11 +31,15 @@ fn default_secret_interval() -> u64 {
     60 * 2
 }
 
-// fn write_file(path: String, content: String) -> std::io::Result<()> {
-//     let mut file = File::create(path)?;
-//     file.write_all(content.as_bytes())?;
-//     Ok(())
-// }
+fn default_generate_crd() -> bool {
+    false
+}
+
+fn write_file(path: String, content: String) -> std::io::Result<()> {
+    let mut file = File::create(path)?;
+    file.write_all(content.as_bytes())?;
+    Ok(())
+}
 
 #[launch]
 async fn rocket() -> _ {
@@ -41,13 +50,18 @@ async fn rocket() -> _ {
         .from_env::<Configuration>()
         .expect("could not parse configuration");
 
-    // Generate and serialize the CRD
-    // write_file(
-    //     "deploy/crd.yaml".to_string(),
-    //     serde_yaml::to_string(&BitwardenSecret::crd())?,
-    // )?;
-
-    info!("starting bitwarden-secretes-operator...");
+    if config.generate_crd {
+        // Generate and serialize the CRD
+        info!("writing crd...");
+        write_file(
+            "crd.yaml".to_string(),
+            serde_yaml::to_string(&BitwardenSecret::crd()).unwrap(),
+        )
+        .unwrap();
+        info!("done!");
+        process::exit(0x0100);
+    }
+    info!("starting bitwarden-secrets-operator...");
     tokio::spawn(async move {
         bitwarden::run(client, config).await.unwrap();
     });

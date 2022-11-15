@@ -1,4 +1,5 @@
 use super::prometheus;
+use chrono;
 use futures::StreamExt;
 use k8s_openapi::api::core::v1::Secret;
 use kube::Resource;
@@ -23,8 +24,9 @@ use crate::Configuration;
 #[derive(CustomResource, Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
 #[kube(group = "jrcichra.dev", version = "v1", kind = "BitwardenSecret")]
 #[kube(shortname = "bws", namespaced)]
-struct BitwardenSecretSpec {
+pub struct BitwardenSecretSpec {
     name: String,
+    key: Option<String>,
 }
 // Data we want access to in error/reconcile calls
 struct Data {
@@ -49,6 +51,7 @@ async fn reconcile(
 ) -> Result<Action, ReconcileError> {
     let client = &ctx.client;
     let name = &generator.spec.name;
+    let key = &generator.spec.key;
     let mut contents = BTreeMap::new();
     // build the content for the secret here
     match ctx.cache.lock().unwrap().get(name) {
@@ -64,18 +67,24 @@ async fn reconcile(
                     String::from(login["password"].as_str().unwrap()),
                 );
             }
-            None => match value.get("notes") {
-                Some(notes) => {
-                    // set it with key "notes"
-                    contents.insert("notes".to_string(), String::from(notes.as_str().unwrap()));
+            None => {
+                let notes_constant = "notes";
+                let mut use_key = notes_constant;
+                if let Some(key) = key {
+                    use_key = key;
                 }
-                None => {
-                    return Err(ReconcileError::BitwardenError(format!(
-                        "card/login not found for {}",
-                        name
-                    )));
+                match value.get(notes_constant) {
+                    Some(notes) => {
+                        contents.insert(use_key.to_string(), String::from(notes.as_str().unwrap()));
+                    }
+                    None => {
+                        return Err(ReconcileError::BitwardenError(format!(
+                            "card/login not found for {}",
+                            name
+                        )));
+                    }
                 }
-            },
+            }
         },
         None => {
             return Err(ReconcileError::BitwardenError(format!(
@@ -86,10 +95,14 @@ async fn reconcile(
     }
 
     let oref = generator.controller_owner_ref(&()).unwrap();
+    let current_time = chrono::offset::Utc::now();
+    let mut annotations = BTreeMap::new();
+    annotations.insert("lastReconciled".to_string(), current_time.to_rfc3339());
     let secret = Secret {
         metadata: ObjectMeta {
             name: generator.metadata.name.clone(),
             owner_references: Some(vec![oref]),
+            annotations: Some(annotations),
             ..ObjectMeta::default()
         },
         string_data: Some(contents),
