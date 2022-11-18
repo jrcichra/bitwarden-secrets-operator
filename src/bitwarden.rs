@@ -78,7 +78,7 @@ async fn reconcile(
                 }
                 match value.get(notes_constant) {
                     Some(notes) => {
-                        contents.insert(use_key.to_string(), notes.to_string());
+                        contents.insert(use_key.to_string(), String::from(notes.as_str().unwrap()));
                     }
                     None => {
                         return Err(ReconcileError::BitwardenError(format!(
