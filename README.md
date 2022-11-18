@@ -18,7 +18,7 @@ If you make a `login` secret in Bitwarden, this translates to a `Secret` with `u
 
 If you make a `secure note` secret in Bitwarden, this translates to a `Secret` with a `notes` key, as it is described in their CLI output.
 
-Other types will probably clog the reconcile loop if referenced.
+There are optional keys for `key` and `type`, which correlate to the fields on the `Secret`.
 
 # Disclaimer
 

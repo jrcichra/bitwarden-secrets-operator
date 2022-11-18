@@ -9,27 +9,33 @@ spec:
     kind: BitwardenSecret
     plural: bitwardensecrets
     shortNames:
-      - bws
+    - bws
     singular: bitwardensecret
   scope: Namespaced
   versions:
-    - additionalPrinterColumns: []
-      name: v1
-      schema:
-        openAPIV3Schema:
-          description: Auto-generated derived type for BitwardenSecretSpec via `CustomResource`
-          properties:
-            spec:
-              properties:
-                name:
-                  type: string
-              required:
-                - name
-              type: object
-          required:
-            - spec
-          title: BitwardenSecret
-          type: object
-      served: true
-      storage: true
-      subresources: {}
+  - additionalPrinterColumns: []
+    name: v1
+    schema:
+      openAPIV3Schema:
+        description: Auto-generated derived type for BitwardenSecretSpec via `CustomResource`
+        properties:
+          spec:
+            properties:
+              key:
+                nullable: true
+                type: string
+              name:
+                type: string
+              type:
+                nullable: true
+                type: string
+            required:
+            - name
+            type: object
+        required:
+        - spec
+        title: BitwardenSecret
+        type: object
+    served: true
+    storage: true
+    subresources: {}
