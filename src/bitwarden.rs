@@ -28,7 +28,7 @@ pub struct BitwardenSecretSpec {
     name: String,
     key: Option<String>,
     #[serde(rename = "type")]
-    typ: Option<String>,
+    type_: Option<String>,
 }
 // Data we want access to in error/reconcile calls
 struct Data {
@@ -54,7 +54,7 @@ async fn reconcile(
     let client = &ctx.client;
     let name = &generator.spec.name;
     let key = &generator.spec.key;
-    let typ = &generator.spec.typ;
+    let type_ = &generator.spec.type_;
     let mut contents = BTreeMap::new();
     // build the content for the secret here
     match ctx.cache.lock().unwrap().get(name) {
@@ -74,7 +74,7 @@ async fn reconcile(
                 let notes_constant = "notes";
                 let mut use_key = notes_constant;
                 if let Some(key) = key {
-                    use_key = key;
+                    use_key = key.as_str();
                 }
                 match value.get(notes_constant) {
                     Some(notes) => {
@@ -109,7 +109,7 @@ async fn reconcile(
             ..ObjectMeta::default()
         },
         string_data: Some(contents),
-        type_: typ.clone(),
+        type_: type_.clone(),
         ..Default::default()
     };
     let secret_api = Api::<Secret>::namespaced(
