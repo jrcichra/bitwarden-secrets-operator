@@ -8,7 +8,7 @@ RUN cargo build --release
 COPY src/ /app/src/
 RUN find src/ -type f -exec touch {} + && cargo build --release
 
-FROM node:19.6.1-bullseye-slim
+FROM node:19.7.0-bullseye-slim
 WORKDIR /app
 RUN npm install -g @bitwarden/cli
 COPY --from=builder /app/target/release/bitwarden-secrets-operator /app/
