@@ -23,4 +23,4 @@ tokio = { version = "1.26", features = ["full"] }
 tracing = "0.1.37"
 tracing-subscriber = "0.3.16"
 rocket = { version = "0.5.0-rc.2" }
-chrono = "0.4.23"
+chrono = "0.4.24"
