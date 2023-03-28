@@ -19,7 +19,7 @@ serde = "1.0.158"
 serde_json = "1.0.94"
 serde_yaml = "0.9.19"
 thiserror = "1.0.40"
-tokio = { version = "1.26", features = ["full"] }
+tokio = { version = "1.27", features = ["full"] }
 tracing = "0.1.37"
 tracing-subscriber = "0.3.16"
 rocket = { version = "0.5.0-rc.3" }
