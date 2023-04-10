@@ -2,9 +2,10 @@ use super::prometheus;
 use chrono;
 use futures::StreamExt;
 use k8s_openapi::api::core::v1::Secret;
+use kube::runtime::watcher;
 use kube::Resource;
 use kube::{
-    api::{Api, ListParams, ObjectMeta, Patch, PatchParams},
+    api::{Api, ObjectMeta, Patch, PatchParams},
     runtime::controller::{Action, Controller},
     Client, CustomResource,
 };
@@ -271,8 +272,8 @@ pub async fn run(client: Client, config: Configuration) -> Result<(), Box<dyn Er
         }
     }
 
-    Controller::new(cmgs, ListParams::default())
-        .owns(cms, ListParams::default())
+    Controller::new(cmgs, watcher::Config::default())
+        .owns(cms, watcher::Config::default())
         .reconcile_all_on(reload_rx.map(|_| ()))
         .shutdown_on_signal()
         .run(reconcile, error_policy, Arc::new(Data { client, cache }))

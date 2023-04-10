@@ -10,8 +10,8 @@ anyhow = "1.0.70"
 dirs = "5.0.0"
 envy = "0.4.2"
 futures = "0.3.27"
-k8s-openapi = { version = "0.17.0", features = ["v1_26"] }
-kube = { version = "0.78.0", features = ["runtime","derive"] }
+k8s-openapi = { version = "0.18.0", features = ["v1_26"] }
+kube = { version = "0.82.0", features = ["runtime","derive"] }
 lazy_static = "1.4.0"
 prometheus = { version = "0.13.3" , features = ["process"] }
 schemars = "0.8.12"
