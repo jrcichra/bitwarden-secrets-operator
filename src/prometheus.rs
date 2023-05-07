@@ -11,8 +11,8 @@ lazy_static! {
 #[get("/metrics")]
 pub fn gather_metrics() -> String {
     let metric_families = prometheus::gather();
-    let mut buffer = Vec::new();
+    let mut buffer = vec![];
     let encoder = TextEncoder::new();
     encoder.encode(&metric_families, &mut buffer).unwrap();
-    String::from_utf8(buffer.clone()).unwrap()
+    String::from_utf8(buffer).unwrap()
 }

@@ -64,11 +64,11 @@ async fn reconcile(
                 // set the username and password keys
                 contents.insert(
                     "username".to_string(),
-                    String::from(login["username"].as_str().unwrap()),
+                    login["username"].as_str().unwrap().to_string(),
                 );
                 contents.insert(
                     "password".to_string(),
-                    String::from(login["password"].as_str().unwrap()),
+                    login["password"].as_str().unwrap().to_string(),
                 );
             }
             None => {
@@ -79,7 +79,7 @@ async fn reconcile(
                 }
                 match value.get(notes_constant) {
                     Some(notes) => {
-                        contents.insert(use_key.to_string(), String::from(notes.as_str().unwrap()));
+                        contents.insert(use_key.to_string(), notes.as_str().unwrap().to_string());
                     }
                     None => {
                         return Err(ReconcileError::BitwardenError(format!(
@@ -240,7 +240,7 @@ pub async fn run(client: Client, config: Configuration) -> Result<(), Box<dyn Er
         }
     });
     let cache_gather = Arc::clone(&cache);
-    let folder_clone = config.folder.clone();
+    let folder = config.folder.clone();
     // Secret Gatherer timer - independent of reconciliation since it grabs all secrets at once
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(config.secret_interval));
@@ -250,7 +250,7 @@ pub async fn run(client: Client, config: Configuration) -> Result<(), Box<dyn Er
                 "interval of {} seconds triggering secret gather loop",
                 config.secret_interval
             );
-            match get_secrets(&get_session(), &folder_clone) {
+            match get_secrets(&get_session(), &folder) {
                 Ok(secrets) => {
                     // update the cache
                     cache_gather.lock().unwrap().clone_from(&secrets);
