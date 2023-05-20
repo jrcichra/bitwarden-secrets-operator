@@ -61,9 +61,13 @@ async fn rocket() -> _ {
         info!("done!");
         process::exit(0x0100);
     }
+
+    // login and get a session key
+    let session = bitwarden::login().unwrap();
+
     info!("starting bitwarden-secrets-operator...");
     tokio::spawn(async move {
-        bitwarden::run(client, config).await.unwrap();
+        bitwarden::run(client, config, session).await.unwrap();
     });
     info!("starting metrics http server...");
     rocket::build().mount("/", routes![prometheus::gather_metrics])

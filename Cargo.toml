@@ -11,7 +11,7 @@ dirs = "5.0.1"
 envy = "0.4.2"
 futures = "0.3.28"
 k8s-openapi = { version = "0.18.0", features = ["v1_26"] }
-kube = { version = "0.82.2", features = ["runtime","derive"] }
+kube = { version = "0.82.2", default-features = false, features = ["client","rustls-tls","runtime","derive"] }
 lazy_static = "1.4.0"
 prometheus = { version = "0.13.3" , features = ["process"] }
 schemars = "0.8.12"
@@ -24,3 +24,4 @@ tracing = "0.1.38"
 tracing-subscriber = "0.3.17"
 rocket = { version = "0.5.0-rc.3" }
 chrono = "0.4.24"
+regex = "1.8.1"

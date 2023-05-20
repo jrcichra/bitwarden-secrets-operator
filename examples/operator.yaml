@@ -18,9 +18,6 @@ spec:
       serviceAccountName: bitwarden-secrets-operator
       containers:
         - image: ghcr.io/jrcichra/bitwarden-secrets-operator
-          # Use this to login to bitwarden for the first time
-          # command: ["tail"]
-          # args: ["-f", "/dev/null"]
           name: bitwarden-secrets-operator
           resources:
             requests:
@@ -29,15 +26,28 @@ spec:
             limits:
               cpu: "200m"
               memory: "512Mi"
-          volumeMounts:
-            - mountPath: /root/.config/Bitwarden CLI
-              name: bitwarden
-          imagePullPolicy: Always
-      volumes:
-        - name: bitwarden
-          ### CHANGEME
-          hostPath:
-            path: /gkube/bitwarden
+          env:
+            - name: ROCKET_ADDRESS
+              value: 0.0.0.0
+            - name: BW_CLIENTID
+              valueFrom:
+                secretKeyRef:
+                  key: BW_CLIENTID
+                  name: bitwarden-credentials
+                  optional: false
+            - name: BW_CLIENTSECRET
+              valueFrom:
+                secretKeyRef:
+                  key: BW_CLIENTSECRET
+                  name: bitwarden-credentials
+                  optional: false
+            - name: BW_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key: BW_PASSWORD
+                  name: bitwarden-credentials
+                  optional: false
+
 ---
 apiVersion: v1
 kind: ServiceAccount
