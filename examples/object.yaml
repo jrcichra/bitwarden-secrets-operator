@@ -7,9 +7,12 @@ spec:
 ---
 apiVersion: jrcichra.dev/v1
 kind: BitwardenSecret
-metadata:
-  name: note
 spec:
-  name: secret-note
+  key: .dockerconfigjson
+  name: ghcrio-pull-docker-config-json
+  type: kubernetes.io/dockerconfigjson
+metadata:
+  name: ghcrio-credentials
+  namespace: kube-applier
 ---
 

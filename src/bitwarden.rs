@@ -1,4 +1,5 @@
 use super::prometheus;
+use crate::Configuration;
 use chrono;
 use futures::StreamExt;
 use k8s_openapi::api::core::v1::Secret;
@@ -9,18 +10,17 @@ use kube::{
     runtime::controller::{Action, Controller},
     Client, CustomResource,
 };
+use lazy_static::lazy_static;
+use regex::Regex;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 use std::error::Error;
-use std::fs;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
-
-use crate::Configuration;
 
 #[derive(CustomResource, Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
 #[kube(group = "jrcichra.dev", version = "v1", kind = "BitwardenSecret")]
@@ -156,7 +156,7 @@ fn get_secrets(
     let stdout = String::from_utf8_lossy(&res.stdout).to_string();
     let stderr = String::from_utf8_lossy(&res.stderr).to_string();
     if !res.status.success() {
-        return Err(format!("stdout: {}\nstderr: {}", stdout, stderr).into());
+        return Err(format!("sync failed: stdout: {}\nstderr: {}", stdout, stderr).into());
     }
 
     // get the id of the provided folder
@@ -170,7 +170,7 @@ fn get_secrets(
     let stdout = String::from_utf8_lossy(&res.stdout).to_string();
     let stderr = String::from_utf8_lossy(&res.stderr).to_string();
     if !res.status.success() {
-        return Err(format!("stdout: {}\nstderr: {}", stdout, stderr).into());
+        return Err(format!("get folder failed: stdout: {}\nstderr: {}", stdout, stderr).into());
     }
 
     // parse stdout
@@ -187,7 +187,7 @@ fn get_secrets(
     let stdout = String::from_utf8_lossy(&res.stdout).to_string();
     let stderr = String::from_utf8_lossy(&res.stderr).to_string();
     if !res.status.success() {
-        return Err(format!("stdout: {}\nstderr: {}", stdout, stderr).into());
+        return Err(format!("list items failed: stdout: {}\nstderr: {}", stdout, stderr).into());
     }
 
     // parse stdout
@@ -208,17 +208,51 @@ fn error_policy(_object: Arc<BitwardenSecret>, _error: &ReconcileError, _ctx: Ar
     Action::requeue(Duration::from_secs(30))
 }
 
-fn get_session() -> String {
-    let homedir = dirs::home_dir().unwrap();
-    let path = format!(
-        "{}/{}",
-        homedir.to_str().unwrap(),
-        ".config/Bitwarden CLI/session"
-    );
-    String::from(fs::read_to_string(path).unwrap().trim())
+pub fn login() -> Result<String, Box<dyn Error>> {
+    // logout in case already logged in
+    Command::new("bw").arg("logout").output()?;
+
+    // first login with --apikey
+    let res = Command::new("bw").arg("login").arg("--apikey").output()?;
+    let stdout = String::from_utf8_lossy(&res.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&res.stderr).to_string();
+
+    if !res.status.success() {
+        return Err(format!("login failed: stdout: {}\nstderr: {}", stdout, stderr).into());
+    }
+
+    // now unlock the vault, referencing the master password in an env (from a mounted secret, hopefully)
+    // TODO: this may hang if BW_PASSWORD is not set
+    let res = Command::new("bw")
+        .arg("unlock")
+        .arg("--passwordenv")
+        .arg("BW_PASSWORD")
+        .output()?;
+    let stdout = String::from_utf8_lossy(&res.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&res.stderr).to_string();
+
+    if !res.status.success() {
+        return Err(format!("unlock failed: stdout: {}\nstderr: {}", stdout, stderr).into());
+    }
+
+    // the session key is within the stdout of this command
+    lazy_static! {
+        static ref RE: Regex = Regex::new("export BW_SESSION=\"(.*)\"").unwrap();
+    }
+
+    // the first match should be what we need
+    for cap in RE.captures_iter(&stdout) {
+        return Ok(cap[1].to_string());
+    }
+
+    Err(format!("could not find BW_SESSION in unlock output").into())
 }
 
-pub async fn run(client: Client, config: Configuration) -> Result<(), Box<dyn Error>> {
+pub async fn run(
+    client: Client,
+    config: Configuration,
+    session: String,
+) -> Result<(), Box<dyn Error>> {
     let cmgs = Api::<BitwardenSecret>::all(client.clone());
     let cms = Api::<BitwardenSecret>::all(client.clone());
     let cache = Arc::new(Mutex::new(HashMap::new()));
@@ -241,6 +275,7 @@ pub async fn run(client: Client, config: Configuration) -> Result<(), Box<dyn Er
     });
     let cache_gather = Arc::clone(&cache);
     let folder = config.folder.clone();
+    let session_clone = session.clone();
     // Secret Gatherer timer - independent of reconciliation since it grabs all secrets at once
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(config.secret_interval));
@@ -250,7 +285,7 @@ pub async fn run(client: Client, config: Configuration) -> Result<(), Box<dyn Er
                 "interval of {} seconds triggering secret gather loop",
                 config.secret_interval
             );
-            match get_secrets(&get_session(), &folder) {
+            match get_secrets(&session, &folder) {
                 Ok(secrets) => {
                     // update the cache
                     cache_gather.lock().unwrap().clone_from(&secrets);
@@ -262,7 +297,7 @@ pub async fn run(client: Client, config: Configuration) -> Result<(), Box<dyn Er
         }
     });
     // run secret grabber once at the start
-    match get_secrets(&get_session(), &config.folder) {
+    match get_secrets(&session_clone, &config.folder) {
         Ok(secrets) => {
             // update the cache
             cache.lock().unwrap().clone_from(&secrets);
