@@ -70,7 +70,11 @@ async fn rocket() -> _ {
             client.clone(),
             client.default_namespace(),
             LeaseLockParams {
-                holder_id: fs::read_to_string("/etc/hostname").await.unwrap(), // /etc/hostname avoids need for downward api
+                holder_id: fs::read_to_string("/etc/hostname")
+                    .await
+                    .unwrap()
+                    .trim()
+                    .to_string(), // /etc/hostname avoids need for downward api
                 lease_name: "bitwarden-secrets-operator".into(),
                 lease_ttl: Duration::from_secs(15),
             },
