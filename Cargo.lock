@@ -143,6 +143,7 @@ dependencies = [
  "futures",
  "k8s-openapi",
  "kube",
+ "kube-leader-election",
  "lazy_static",
  "prometheus",
  "regex",
@@ -914,6 +915,21 @@ dependencies = [
  "quote",
  "serde_json",
  "syn 1.0.104",
+]
+
+[[package]]
+name = "kube-leader-election"
+version = "0.22.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aa3f6f54a32d2ce4f8d5763174a507a16b3cd96b8d64362909a1061357b59983"
+dependencies = [
+ "chrono",
+ "k8s-openapi",
+ "kube",
+ "log",
+ "serde",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]

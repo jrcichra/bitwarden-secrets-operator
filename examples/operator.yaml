@@ -6,7 +6,7 @@ metadata:
   labels:
     name: bitwarden-secrets-operator
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
       app: bitwarden-secrets-operator

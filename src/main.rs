@@ -2,11 +2,13 @@
 extern crate rocket;
 pub mod bitwarden;
 pub mod prometheus;
-use std::{fs::File, io::Write, process};
+use std::{fs::File, io::Write, process, time::Duration};
 
 use crate::bitwarden::BitwardenSecret;
 use kube::{Client, CustomResourceExt};
+use kube_leader_election::{LeaseLock, LeaseLockParams};
 use serde::Deserialize;
+use tokio::fs;
 #[derive(Deserialize, Debug)]
 pub struct Configuration {
     #[serde(default = "default_folder")]
@@ -60,6 +62,29 @@ async fn rocket() -> _ {
         .unwrap();
         info!("done!");
         process::exit(0x0100);
+    }
+
+    // leader election - block everything until the lease is acquired
+    {
+        let leadership = LeaseLock::new(
+            client.clone(),
+            client.default_namespace(),
+            LeaseLockParams {
+                holder_id: fs::read_to_string("/etc/hostname").await.unwrap(), // /etc/hostname avoids need for downward api
+                lease_name: "bitwarden-secrets-operator".into(),
+                lease_ttl: Duration::from_secs(15),
+            },
+        );
+        info!("acquiring lock...");
+        while !leadership
+            .try_acquire_or_renew()
+            .await
+            .unwrap()
+            .acquired_lease
+        {
+            info!("retry acquiring lock...");
+        }
+        info!("lock acquired!");
     }
 
     // login and get a session key
