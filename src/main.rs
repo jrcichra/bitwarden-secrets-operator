@@ -2,12 +2,10 @@
 extern crate rocket;
 pub mod bitwarden;
 pub mod prometheus;
-use std::{fs::File, io::Write, process, time::Duration};
-
-use crate::bitwarden::BitwardenSecret;
-use kube::{Client, CustomResourceExt};
+use kube::Client;
 use kube_leader_election::{LeaseLock, LeaseLockParams};
 use serde::Deserialize;
+use std::{error::Error, time::Duration};
 use tokio::fs;
 #[derive(Deserialize, Debug)]
 pub struct Configuration {
@@ -17,8 +15,6 @@ pub struct Configuration {
     reconcile_interval: u64,
     #[serde(default = "default_secret_interval")]
     secret_interval: u64,
-    #[serde(default = "default_generate_crd")]
-    generate_crd: bool,
 }
 
 fn default_folder() -> String {
@@ -33,42 +29,40 @@ fn default_secret_interval() -> u64 {
     60 * 2
 }
 
-fn default_generate_crd() -> bool {
-    false
-}
-
-fn write_file(path: String, content: String) -> std::io::Result<()> {
-    let mut file = File::create(path)?;
-    file.write_all(content.as_bytes())?;
-    Ok(())
-}
-
-#[launch]
-async fn rocket() -> _ {
-    tracing_subscriber::fmt::init();
+// start of code once leader election is completed
+async fn start() {
     let client = Client::try_default().await.unwrap();
-
     let config = envy::prefixed("BITWARDEN_SECRETS_OPERATOR_")
         .from_env::<Configuration>()
         .expect("could not parse configuration");
 
-    if config.generate_crd {
-        // Generate and serialize the CRD
-        info!("writing crd...");
-        write_file(
-            "crd.yaml".to_string(),
-            serde_yaml::to_string(&BitwardenSecret::crd()).unwrap(),
-        )
-        .unwrap();
-        info!("done!");
-        process::exit(0x0100);
-    }
+    // login and get a session key
+    let session = bitwarden::login().unwrap();
+    info!("starting bitwarden-secrets-operator...");
+    tokio::spawn(async move {
+        bitwarden::run(client, config, session).await.unwrap();
+    });
+    info!("starting metrics http server...");
+    tokio::spawn(async move {
+        rocket::build()
+            .mount("/", routes![prometheus::gather_metrics])
+            .launch()
+            .await
+            .unwrap();
+    });
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn Error>> {
+    tracing_subscriber::fmt::init();
 
     // leader election - block everything until the lease is acquired
-    {
+    tokio::spawn(async move {
+        let client = Client::try_default().await.unwrap();
+        let namespace = client.default_namespace().to_owned();
         let leadership = LeaseLock::new(
-            client.clone(),
-            client.default_namespace(),
+            client,
+            &namespace,
             LeaseLockParams {
                 holder_id: fs::read_to_string("/etc/hostname")
                     .await
@@ -79,25 +73,22 @@ async fn rocket() -> _ {
                 lease_ttl: Duration::from_secs(15),
             },
         );
-        info!("acquiring lock...");
-        while !leadership
-            .try_acquire_or_renew()
-            .await
-            .unwrap()
-            .acquired_lease
-        {
-            info!("retry acquiring lock...");
+        let mut started = false;
+        loop {
+            let lease = leadership.try_acquire_or_renew().await.unwrap(); // kills the program if we lose leader election
+            if lease.acquired_lease {
+                if !started {
+                    started = true;
+                    start().await;
+                }
+            } else {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
         }
-        info!("lock acquired!");
-    }
-
-    // login and get a session key
-    let session = bitwarden::login().unwrap();
-
-    info!("starting bitwarden-secrets-operator...");
-    tokio::spawn(async move {
-        bitwarden::run(client, config, session).await.unwrap();
     });
-    info!("starting metrics http server...");
-    rocket::build().mount("/", routes![prometheus::gather_metrics])
+
+    // terribly hold the main thread by sleeping forever
+    loop {
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
 }
