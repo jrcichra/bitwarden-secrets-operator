@@ -56,6 +56,13 @@ async fn start() {
 async fn main() -> Result<(), Box<dyn Error>> {
     tracing_subscriber::fmt::init();
 
+    // the death of a thread should kill the process
+    let default_panic = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        default_panic(info);
+        std::process::exit(1);
+    }));
+
     // leader election - block everything until the lease is acquired
     tokio::spawn(async move {
         let client = Client::try_default().await.unwrap();
