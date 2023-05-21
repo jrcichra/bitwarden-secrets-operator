@@ -83,13 +83,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let mut started = false;
         loop {
             let lease = leadership.try_acquire_or_renew().await.unwrap();
-            if lease.acquired_lease {
-                if !started {
-                    started = true;
-                    start().await;
-                }
-            } else {
-                panic!("lost leader election");
+            if lease.acquired_lease && !started {
+                started = true;
+                start().await;
+            }
+            if !lease.acquired_lease && started {
+                panic!("stopping process - lost leader election");
             }
             tokio::time::sleep(Duration::from_secs(5)).await;
         }
