@@ -24,4 +24,4 @@ tracing = "0.1.38"
 tracing-subscriber = "0.3.17"
 rocket = { version = "0.5.0-rc.3" }
 chrono = "0.4.24"
-regex = "1.8.2"
+regex = "1.8.3"
