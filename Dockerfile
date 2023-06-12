@@ -3,7 +3,7 @@ WORKDIR /app
 COPY target/aarch64-unknown-linux-gnu/release/bitwarden-secrets-operator bitwarden-secrets-operator-arm64
 COPY target/x86_64-unknown-linux-gnu/release/bitwarden-secrets-operator bitwarden-secrets-operator-amd64
 
-FROM node:20.2.0-bullseye-slim
+FROM node:20.3.0-bullseye-slim
 WORKDIR /app
 ARG TARGETARCH
 RUN npm install -g @bitwarden/cli
