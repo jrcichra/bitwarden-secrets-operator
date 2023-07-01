@@ -52,12 +52,18 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Install cross
-        run: cargo install -f cross
-      - name: Build for x86
-        run: cross build --target x86_64-unknown-linux-gnu --release
+      - name: Build for x86_64
+        uses: actions-rs/cargo@v1
+        with:
+          use-cross: true
+          command: build
+          args: --target x86_64-unknown-linux-gnu --release
       - name: Build for aarch64
-        run: cross build --target aarch64-unknown-linux-gnu --release
+        uses: actions-rs/cargo@v1
+        with:
+          use-cross: true
+          command: build
+          args: -target aarch64-unknown-linux-gnu --release
       - uses: docker/build-push-action@v4
         with:
           context: .
