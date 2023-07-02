@@ -63,7 +63,7 @@ jobs:
         with:
           use-cross: true
           command: build
-          args: -target aarch64-unknown-linux-gnu --release
+          args: --target aarch64-unknown-linux-gnu --release
       - uses: docker/build-push-action@v4
         with:
           context: .
