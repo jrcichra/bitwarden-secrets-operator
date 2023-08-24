@@ -15,7 +15,7 @@ kube = { version = "0.85.0", default-features = false, features = ["client","rus
 lazy_static = "1.4.0"
 prometheus = { version = "0.13.3" , features = ["process"] }
 schemars = "0.8.12"
-serde = "1.0.185"
+serde = "1.0.186"
 serde_json = "1.0.105"
 serde_yaml = "0.9.25"
 thiserror = "1.0.47"
