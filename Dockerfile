@@ -1,7 +1,7 @@
 FROM alpine:edge as rename
 WORKDIR /app
-COPY target/aarch64-unknown-linux-gnu/release/bitwarden-secrets-operator bitwarden-secrets-operator-arm64
-COPY target/x86_64-unknown-linux-gnu/release/bitwarden-secrets-operator bitwarden-secrets-operator-amd64
+COPY target/aarch64-unknown-linux-musl/release/bitwarden-secrets-operator bitwarden-secrets-operator-arm64
+COPY target/x86_64-unknown-linux-musl/release/bitwarden-secrets-operator bitwarden-secrets-operator-amd64
 
 FROM alpine:edge
 WORKDIR /app

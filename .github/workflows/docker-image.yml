@@ -57,13 +57,13 @@ jobs:
         with:
           use-cross: true
           command: build
-          args: --target x86_64-unknown-linux-gnu --release
+          args: --target x86_64-unknown-linux-musl --release
       - name: Build for aarch64
         uses: actions-rs/cargo@v1
         with:
           use-cross: true
           command: build
-          args: --target aarch64-unknown-linux-gnu --release
+          args: --target aarch64-unknown-linux-musl --release
       - uses: docker/build-push-action@v5
         with:
           context: .
