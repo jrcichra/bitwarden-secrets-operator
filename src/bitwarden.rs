@@ -148,7 +148,7 @@ fn get_secrets(
 ) -> Result<HashMap<std::string::String, serde_json::Value>, Box<dyn Error>> {
     let mut secrets = HashMap::new();
     // sync the secrets
-    let res = Command::new("bw")
+    let res = Command::new("rbw")
         .arg("sync")
         .arg("--session")
         .arg(&session)
@@ -160,7 +160,7 @@ fn get_secrets(
     }
 
     // get the id of the provided folder
-    let res = Command::new("bw")
+    let res = Command::new("rbw")
         .arg("get")
         .arg("folder")
         .arg(&folder)
@@ -176,7 +176,7 @@ fn get_secrets(
     // parse stdout
     let folder_json: Value = serde_json::from_str(&stdout)?;
     // get the secrets in the provided folder
-    let res = Command::new("bw")
+    let res = Command::new("rbw")
         .arg("list")
         .arg("items")
         .arg("--folderid")
@@ -210,10 +210,10 @@ fn error_policy(_object: Arc<BitwardenSecret>, _error: &ReconcileError, _ctx: Ar
 
 pub fn login() -> Result<String, Box<dyn Error>> {
     // logout in case already logged in
-    Command::new("bw").arg("logout").output()?;
+    Command::new("rbw").arg("logout").output()?;
 
     // first login with --apikey
-    let res = Command::new("bw").arg("login").arg("--apikey").output()?;
+    let res = Command::new("rbw").arg("login").arg("--apikey").output()?;
     let stdout = String::from_utf8_lossy(&res.stdout).to_string();
     let stderr = String::from_utf8_lossy(&res.stderr).to_string();
 
@@ -223,7 +223,7 @@ pub fn login() -> Result<String, Box<dyn Error>> {
 
     // now unlock the vault, referencing the master password in an env (from a mounted secret, hopefully)
     // TODO: this may hang if BW_PASSWORD is not set
-    let res = Command::new("bw")
+    let res = Command::new("rbw")
         .arg("unlock")
         .arg("--passwordenv")
         .arg("BW_PASSWORD")
