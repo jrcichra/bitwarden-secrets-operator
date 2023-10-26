@@ -56,14 +56,22 @@ jobs:
         uses: actions-rs/cargo@v1
         with:
           use-cross: true
-          command: install rbw
-          args: --target x86_64-unknown-linux-gnu
+          command: install
+          args: rbw --target x86_64-unknown-linux-gnu
+      - name: Show bin folder x86
+        run: |
+          ls -l $HOME/.cargo/bin
+          file $HOME/.cargo/bin/*
       - name: Build rbw for aarch64
         uses: actions-rs/cargo@v1
         with:
           use-cross: true
-          command: install rbw
-          args: --target aarch64-unknown-linux-gnu
+          command: install
+          args: rbw --target aarch64-unknown-linux-gnu
+      - name: Show bin folder aarch64
+        run: |
+          ls -l $HOME/.cargo/bin
+          file $HOME/.cargo/bin/*
       - name: Build bitwarden-secrets-operator for x86_64
         uses: actions-rs/cargo@v1
         with:
