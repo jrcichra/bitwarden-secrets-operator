@@ -8,8 +8,7 @@ lazy_static! {
         register_int_gauge!("last_reconcile", "Time we last reconciled sucessfully").unwrap();
 }
 
-#[get("/metrics")]
-pub fn gather_metrics() -> String {
+pub async fn gather_metrics() -> String {
     let metric_families = prometheus::gather();
     let mut buffer = vec![];
     let encoder = TextEncoder::new();
