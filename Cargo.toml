@@ -16,7 +16,7 @@ lazy_static = "1.4.0"
 prometheus = { version = "0.13.3" , features = ["process"] }
 schemars = "0.8.15"
 serde = "1.0.190"
-serde_json = "1.0.107"
+serde_json = "1.0.108"
 serde_yaml = "0.9.27"
 thiserror = "1.0.50"
 tokio = { version = "1.33", features = ["full"] }
