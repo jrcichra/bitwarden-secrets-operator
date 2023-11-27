@@ -1,11 +1,11 @@
 pub mod bitwarden;
 pub mod prometheus;
-use std::{fs::File, io::Write, net::SocketAddr, process};
-
 use crate::bitwarden::BitwardenSecret;
 use axum::{routing::get, Router};
 use kube::{Client, CustomResourceExt};
 use serde::Deserialize;
+use std::{fs::File, io::Write, process};
+use tokio::net::TcpListener;
 use tracing::info;
 #[derive(Deserialize, Debug)]
 pub struct Configuration {
@@ -79,10 +79,9 @@ async fn main() {
     info!("starting metrics http server...");
 
     let app = Router::new().route("/metrics", get(prometheus::gather_metrics));
-    let addr = SocketAddr::from(([0, 0, 0, 0], metrics_port));
-    info!("listening on {}", addr);
-    axum::Server::bind(&addr)
-        .serve(app.into_make_service())
-        .await
-        .unwrap();
+
+    let bind = format!("0.0.0.0:{}", metrics_port);
+    let listener = TcpListener::bind(&bind).await.unwrap();
+    info!("listening on {}", &bind);
+    axum::serve(listener, app).await.unwrap();
 }
