@@ -5,7 +5,7 @@ use prometheus::register_int_gauge;
 
 lazy_static! {
     pub static ref LAST_SUCCESSFUL_RECONCILE: IntGauge =
-        register_int_gauge!("last_reconcile", "Time we last reconciled sucessfully").unwrap();
+        register_int_gauge!("last_reconcile", "Time we last reconciled successfully").unwrap();
 }
 
 pub async fn gather_metrics() -> String {
