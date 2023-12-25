@@ -1,5 +1,5 @@
 use super::prometheus;
-use crate::Configuration;
+use crate::Args;
 use chrono;
 use futures::StreamExt;
 use k8s_openapi::api::core::v1::Secret;
@@ -249,11 +249,7 @@ pub fn login() -> Result<String, Box<dyn Error>> {
     Err(format!("could not find BW_SESSION in unlock output").into())
 }
 
-pub async fn run(
-    client: Client,
-    config: Configuration,
-    session: String,
-) -> Result<(), Box<dyn Error>> {
+pub async fn run(client: Client, args: Args, session: String) -> Result<(), Box<dyn Error>> {
     let cmgs = Api::<BitwardenSecret>::all(client.clone());
     let cms = Api::<BitwardenSecret>::all(client.clone());
     let cache = Arc::new(Mutex::new(HashMap::new()));
@@ -262,12 +258,12 @@ pub async fn run(
 
     // Reconcile loop timer
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(config.reconcile_interval));
+        let mut interval = tokio::time::interval(Duration::from_secs(args.reconcile_interval));
         loop {
             interval.tick().await;
             info!(
                 "interval of {} seconds triggering reconcile loop",
-                config.reconcile_interval
+                args.reconcile_interval
             );
             reload_tx
                 .try_send(())
@@ -275,16 +271,16 @@ pub async fn run(
         }
     });
     let cache_gather = Arc::clone(&cache);
-    let folder = config.folder.clone();
+    let folder = args.folder.clone();
     let session_clone = session.clone();
     // Secret Gatherer timer - independent of reconciliation since it grabs all secrets at once
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(config.secret_interval));
+        let mut interval = tokio::time::interval(Duration::from_secs(args.secret_interval));
         loop {
             interval.tick().await;
             info!(
                 "interval of {} seconds triggering secret gather loop",
-                config.secret_interval
+                args.secret_interval
             );
             match get_secrets(&session, &folder) {
                 Ok(secrets) => {
@@ -298,7 +294,7 @@ pub async fn run(
         }
     });
     // run secret grabber once at the start
-    match get_secrets(&session_clone, &config.folder) {
+    match get_secrets(&session_clone, &args.folder) {
         Ok(secrets) => {
             // update the cache
             cache.lock().unwrap().clone_from(&secrets);

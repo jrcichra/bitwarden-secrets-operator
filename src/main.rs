@@ -2,43 +2,25 @@ pub mod bitwarden;
 pub mod prometheus;
 use crate::bitwarden::BitwardenSecret;
 use axum::{routing::get, Router};
+use clap::Parser;
 use kube::{Client, CustomResourceExt};
-use serde::Deserialize;
 use std::{fs::File, io::Write, process};
 use tokio::net::TcpListener;
 use tracing::info;
-#[derive(Deserialize, Debug)]
-pub struct Configuration {
-    #[serde(default = "default_folder")]
+
+#[derive(Parser, Debug, Clone)]
+#[clap(author, version, about, long_about = None)]
+pub struct Args {
+    #[clap(long, default_value = "kubernetes")]
     folder: String,
-    #[serde(default = "default_reconcile_interval")]
+    #[clap(long, default_value_t = 60 * 5)]
     reconcile_interval: u64,
-    #[serde(default = "default_secret_interval")]
+    #[clap(long, default_value_t = 60 * 2)]
     secret_interval: u64,
-    #[serde(default = "default_generate_crd")]
+    #[clap(long, default_value_t = false)]
     generate_crd: bool,
-    #[serde(default = "default_metrics_port")]
+    #[clap(long, default_value_t = 8000)]
     metrics_port: u16,
-}
-
-fn default_folder() -> String {
-    "kubernetes".to_string()
-}
-
-fn default_reconcile_interval() -> u64 {
-    60 * 5
-}
-
-fn default_secret_interval() -> u64 {
-    60 * 2
-}
-
-fn default_generate_crd() -> bool {
-    false
-}
-
-fn default_metrics_port() -> u16 {
-    8000
 }
 
 fn write_file(path: String, content: String) -> std::io::Result<()> {
@@ -50,14 +32,11 @@ fn write_file(path: String, content: String) -> std::io::Result<()> {
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt::init();
+    let args = Args::parse();
     let client = Client::try_default().await.unwrap();
+    let metrics_port = args.metrics_port;
 
-    let config = envy::prefixed("BITWARDEN_SECRETS_OPERATOR_")
-        .from_env::<Configuration>()
-        .expect("could not parse configuration");
-    let metrics_port = config.metrics_port;
-
-    if config.generate_crd {
+    if args.generate_crd {
         // Generate and serialize the CRD
         info!("writing crd...");
         write_file(
@@ -74,7 +53,7 @@ async fn main() {
 
     info!("starting bitwarden-secrets-operator...");
     tokio::spawn(async move {
-        bitwarden::run(client, config, session).await.unwrap();
+        bitwarden::run(client, args, session).await.unwrap();
     });
     info!("starting metrics http server...");
 
