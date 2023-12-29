@@ -9,7 +9,7 @@ edition = "2021"
 anyhow = "1.0.77"
 axum = "0.7.2"
 chrono = "0.4.31"
-clap = { version = "4.4.11", features = ["env", "derive"] }
+clap = { version = "4.4.12", features = ["env", "derive"] }
 dirs = "5.0.1"
 futures = "0.3.29"
 k8s-openapi = { version = "0.20.0", features = ["v1_28"] }
