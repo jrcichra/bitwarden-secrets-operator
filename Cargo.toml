@@ -7,7 +7,7 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0.77"
-axum = "0.7.2"
+axum = "0.7.3"
 chrono = "0.4.31"
 clap = { version = "4.4.12", features = ["env", "derive"] }
 dirs = "5.0.1"
