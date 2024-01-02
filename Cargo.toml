@@ -21,7 +21,7 @@ schemars = "0.8.16"
 serde = "1.0.193"
 serde_json = "1.0.109"
 serde_yaml = "0.9.29"
-thiserror = "1.0.53"
+thiserror = "1.0.56"
 tokio = { version = "1.35", features = ["full"] }
 tracing = "0.1.40"
 tracing-subscriber = "0.3.18"
