@@ -11,15 +11,15 @@ use tracing::info;
 #[derive(Parser, Debug, Clone)]
 #[clap(author, version, about, long_about = None)]
 pub struct Args {
-    #[clap(long, default_value = "kubernetes")]
+    #[clap(long, env, default_value = "kubernetes")]
     folder: String,
-    #[clap(long, default_value_t = 60 * 5)]
+    #[clap(long, env,default_value_t = 60 * 5)]
     reconcile_interval: u64,
-    #[clap(long, default_value_t = 60 * 2)]
+    #[clap(long, env,default_value_t = 60 * 2)]
     secret_interval: u64,
-    #[clap(long, default_value_t = false)]
+    #[clap(long, env, default_value_t = false)]
     generate_crd: bool,
-    #[clap(long, default_value_t = 8000)]
+    #[clap(long, env, default_value_t = 8000)]
     metrics_port: u16,
 }
 
