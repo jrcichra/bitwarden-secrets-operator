@@ -1,5 +1,6 @@
 use super::prometheus;
 use crate::Args;
+use anyhow::Result;
 use chrono;
 use futures::StreamExt;
 use k8s_openapi::api::core::v1::Secret;

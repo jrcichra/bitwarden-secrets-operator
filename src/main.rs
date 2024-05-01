@@ -1,6 +1,7 @@
 pub mod bitwarden;
 pub mod prometheus;
 use crate::bitwarden::BitwardenSecret;
+use anyhow::Result;
 use axum::{routing::get, Router};
 use clap::Parser;
 use kube::{Client, CustomResourceExt};
@@ -30,10 +31,15 @@ fn write_file(path: String, content: String) -> std::io::Result<()> {
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
+
+    ctrlc::set_handler(move || {
+        std::process::exit(0);
+    })?;
+
     let args = Args::parse();
-    let client = Client::try_default().await.unwrap();
+    let client = Client::try_default().await?;
     let metrics_port = args.metrics_port;
 
     if args.generate_crd {
@@ -41,9 +47,8 @@ async fn main() {
         info!("writing crd...");
         write_file(
             "crd.yaml".to_string(),
-            serde_yaml::to_string(&BitwardenSecret::crd()).unwrap(),
-        )
-        .unwrap();
+            serde_yaml::to_string(&BitwardenSecret::crd())?,
+        )?;
         info!("done!");
         process::exit(0x0100);
     }
@@ -60,7 +65,8 @@ async fn main() {
     let app = Router::new().route("/metrics", get(prometheus::gather_metrics));
 
     let bind = format!("0.0.0.0:{}", metrics_port);
-    let listener = TcpListener::bind(&bind).await.unwrap();
+    let listener = TcpListener::bind(&bind).await?;
     info!("listening on {}", &bind);
-    axum::serve(listener, app).await.unwrap();
+    axum::serve(listener, app).await?;
+    Ok(())
 }
