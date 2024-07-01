@@ -9,7 +9,7 @@ edition = "2021"
 anyhow = "1.0.86"
 axum = "0.7.5"
 chrono = "0.4.38"
-clap = { version = "4.5.7", features = ["derive", "env"] }
+clap = { version = "4.5.8", features = ["derive", "env"] }
 ctrlc = { version = "3.4.4", features = ["termination"] }
 dirs = "5.0.1"
 futures = "0.3.29"
