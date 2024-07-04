@@ -5,7 +5,8 @@ use anyhow::Result;
 use axum::{routing::get, Router};
 use clap::Parser;
 use kube::{Client, CustomResourceExt};
-use std::{fs::File, io::Write, process};
+use kube_leader_election::{LeaseLock, LeaseLockParams};
+use std::{fs::File, io::Write, process, thread, time::Duration};
 use tokio::net::TcpListener;
 use tracing::info;
 
@@ -22,6 +23,10 @@ pub struct Args {
     generate_crd: bool,
     #[clap(long, env, default_value_t = 8000)]
     metrics_port: u16,
+    #[clap(long, env)]
+    namespace: String, // set from downward API
+    #[clap(long, env)]
+    hostname: String, // set from downward API
 }
 
 fn write_file(path: String, content: String) -> std::io::Result<()> {
@@ -53,8 +58,33 @@ async fn main() -> Result<()> {
         process::exit(0x0100);
     }
 
+    let leadership = LeaseLock::new(
+        kube::Client::try_default().await?,
+        &args.namespace,
+        LeaseLockParams {
+            holder_id: args.hostname.clone().into(),
+            lease_name: "bitwarden-secrets-operator".into(),
+            lease_ttl: Duration::from_secs(15),
+        },
+    );
+
+    info!("waiting for lock...");
+    let lease = leadership.try_acquire_or_renew().await?;
+    info!("acquired lock!");
+
+    // start a background thread to see if we're still leader
+    thread::spawn(move || loop {
+        if !lease.acquired_lease {
+            info!("lost lease, exiting...");
+            process::exit(0x0100);
+        }
+        thread::sleep(Duration::from_secs(1));
+    });
+
     // login and get a session key
+    info!("login to bitwarden...");
     let session = bitwarden::login().unwrap();
+    info!("logged in to bitwarden");
 
     info!("starting bitwarden-secrets-operator...");
     tokio::spawn(async move {
