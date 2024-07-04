@@ -40,7 +40,7 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
 
     ctrlc::set_handler(move || {
-        std::process::exit(0);
+        process::exit(0);
     })?;
 
     let args = Args::parse();
@@ -55,7 +55,7 @@ async fn main() -> Result<()> {
             serde_yaml::to_string(&BitwardenSecret::crd())?,
         )?;
         info!("done!");
-        process::exit(0x0100);
+        process::exit(0);
     }
 
     let leadership = LeaseLock::new(
@@ -69,16 +69,25 @@ async fn main() -> Result<()> {
     );
 
     info!("waiting for lock...");
-    let lease = leadership.try_acquire_or_renew().await?;
+    loop {
+        let lease = leadership.try_acquire_or_renew().await?;
+        if lease.acquired_lease {
+            break;
+        }
+        thread::sleep(Duration::from_secs(5));
+    }
     info!("acquired lock!");
 
     // start a background thread to see if we're still leader
-    thread::spawn(move || loop {
-        if !lease.acquired_lease {
-            info!("lost lease, exiting...");
-            process::exit(0x0100);
+    tokio::spawn(async move {
+        loop {
+            let lease = leadership.try_acquire_or_renew().await.unwrap();
+            if !lease.acquired_lease {
+                info!("lost lease, exiting...");
+                process::exit(1);
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
         }
-        thread::sleep(Duration::from_secs(1));
     });
 
     // login and get a session key
