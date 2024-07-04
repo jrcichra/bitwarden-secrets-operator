@@ -18,10 +18,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 use std::error::Error;
-use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
+use tokio::process::Command;
 use tracing::{info, warn};
 
 #[derive(CustomResource, Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
@@ -144,7 +144,7 @@ async fn reconcile(
 }
 
 // collect secrets and return a hash of the results
-fn get_secrets(
+async fn get_secrets(
     session: &str,
     folder: &str,
 ) -> Result<HashMap<std::string::String, serde_json::Value>, Box<dyn Error>> {
@@ -154,7 +154,8 @@ fn get_secrets(
         .arg("sync")
         .arg("--session")
         .arg(&session)
-        .output()?;
+        .output()
+        .await?;
     let stdout = String::from_utf8_lossy(&res.stdout).to_string();
     let stderr = String::from_utf8_lossy(&res.stderr).to_string();
     if !res.status.success() {
@@ -168,7 +169,8 @@ fn get_secrets(
         .arg(&folder)
         .arg("--session")
         .arg(&session)
-        .output()?;
+        .output()
+        .await?;
     let stdout = String::from_utf8_lossy(&res.stdout).to_string();
     let stderr = String::from_utf8_lossy(&res.stderr).to_string();
     if !res.status.success() {
@@ -185,7 +187,8 @@ fn get_secrets(
         .arg(folder_json["id"].as_str().unwrap())
         .arg("--session")
         .arg(&session)
-        .output()?;
+        .output()
+        .await?;
     let stdout = String::from_utf8_lossy(&res.stdout).to_string();
     let stderr = String::from_utf8_lossy(&res.stderr).to_string();
     if !res.status.success() {
@@ -210,12 +213,16 @@ fn error_policy(_object: Arc<BitwardenSecret>, _error: &ReconcileError, _ctx: Ar
     Action::requeue(Duration::from_secs(30))
 }
 
-pub fn login() -> Result<String, Box<dyn Error>> {
+pub async fn login() -> Result<String, Box<dyn Error>> {
     // logout in case already logged in
-    Command::new("bw").arg("logout").output()?;
+    Command::new("bw").arg("logout").output().await?;
 
     // first login with --apikey
-    let res = Command::new("bw").arg("login").arg("--apikey").output()?;
+    let res = Command::new("bw")
+        .arg("login")
+        .arg("--apikey")
+        .output()
+        .await?;
     let stdout = String::from_utf8_lossy(&res.stdout).to_string();
     let stderr = String::from_utf8_lossy(&res.stderr).to_string();
 
@@ -229,7 +236,8 @@ pub fn login() -> Result<String, Box<dyn Error>> {
         .arg("unlock")
         .arg("--passwordenv")
         .arg("BW_PASSWORD")
-        .output()?;
+        .output()
+        .await?;
     let stdout = String::from_utf8_lossy(&res.stdout).to_string();
     let stderr = String::from_utf8_lossy(&res.stderr).to_string();
 
@@ -283,7 +291,7 @@ pub async fn run(client: Client, args: Args, session: String) -> Result<(), Box<
                 "interval of {} seconds triggering secret gather loop",
                 args.secret_interval
             );
-            match get_secrets(&session, &folder) {
+            match get_secrets(&session, &folder).await {
                 Ok(secrets) => {
                     // update the cache
                     cache_gather.lock().unwrap().clone_from(&secrets);
@@ -295,7 +303,7 @@ pub async fn run(client: Client, args: Args, session: String) -> Result<(), Box<
         }
     });
     // run secret grabber once at the start
-    match get_secrets(&session_clone, &args.folder) {
+    match get_secrets(&session_clone, &args.folder).await {
         Ok(secrets) => {
             // update the cache
             cache.lock().unwrap().clone_from(&secrets);

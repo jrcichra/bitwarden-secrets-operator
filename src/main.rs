@@ -92,7 +92,7 @@ async fn main() -> Result<()> {
 
     // login and get a session key
     info!("login to bitwarden...");
-    let session = bitwarden::login().unwrap();
+    let session = bitwarden::login().await.unwrap();
     info!("logged in to bitwarden");
 
     info!("starting bitwarden-secrets-operator...");
