@@ -86,7 +86,7 @@ async fn main() -> Result<()> {
                 info!("lost lease, exiting...");
                 process::exit(1);
             }
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            tokio::time::sleep(Duration::from_secs(5)).await;
         }
     });
 
