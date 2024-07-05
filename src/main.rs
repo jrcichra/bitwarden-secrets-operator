@@ -25,8 +25,6 @@ pub struct Args {
     metrics_port: u16,
     #[clap(long, env)]
     namespace: String, // set from downward API
-    #[clap(long, env)]
-    hostname: String, // set from downward API
 }
 
 fn write_file(path: String, content: String) -> std::io::Result<()> {
@@ -44,6 +42,7 @@ async fn main() -> Result<()> {
     })?;
 
     let args = Args::parse();
+    let hostname = gethostname::gethostname();
     let client = Client::try_default().await?;
     let metrics_port = args.metrics_port;
 
@@ -62,7 +61,7 @@ async fn main() -> Result<()> {
         kube::Client::try_default().await?,
         &args.namespace,
         LeaseLockParams {
-            holder_id: args.hostname.clone().into(),
+            holder_id: hostname.into_string().unwrap(),
             lease_name: "bitwarden-secrets-operator".into(),
             lease_ttl: Duration::from_secs(15),
         },
