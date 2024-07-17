@@ -8,7 +8,7 @@ use kube::{Client, CustomResourceExt};
 use kube_leader_election::{LeaseLock, LeaseLockParams};
 use std::{fs::File, io::Write, process, thread, time::Duration};
 use tokio::net::TcpListener;
-use tracing::info;
+use tracing::{info, warn};
 
 #[derive(Parser, Debug, Clone)]
 #[clap(author, version, about, long_about = None)]
@@ -80,12 +80,18 @@ async fn main() -> Result<()> {
     // start a background thread to see if we're still leader
     tokio::spawn(async move {
         loop {
-            let lease = leadership.try_acquire_or_renew().await.unwrap();
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            let lease = match leadership.try_acquire_or_renew().await {
+                Ok(l) => l,
+                Err(e) => {
+                    warn!("background lease error: {}", e);
+                    continue;
+                }
+            };
             if !lease.acquired_lease {
                 info!("lost lease, exiting...");
                 process::exit(1);
             }
-            tokio::time::sleep(Duration::from_secs(5)).await;
         }
     });
 
