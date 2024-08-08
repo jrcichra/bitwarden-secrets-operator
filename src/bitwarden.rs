@@ -201,7 +201,11 @@ async fn get_secrets(
     // loop through each item
     if let Some(arr) = v.as_array() {
         for item in arr {
-            secrets.insert(String::from(item["name"].as_str().unwrap()), item.clone());
+            if let Some(str) = item["name"].as_str() {
+                secrets.insert(str.to_string(), item.clone());
+            } else {
+                warn!("Could not decode item into string :{:?}", item);
+            }
         }
     }
 
