@@ -7,6 +7,6 @@ COPY target/x86_64-unknown-linux-gnu/release/bitwarden-secrets-operator bitwarde
 FROM node:20.16.0-bookworm-slim
 WORKDIR /app
 ARG TARGETARCH
-RUN npm install -g @bitwarden/cli@2023.8.2
+RUN npm install -g @bitwarden/cli
 COPY --from=rename /app/bitwarden-secrets-operator-$TARGETARCH /app/bitwarden-secrets-operator
 ENTRYPOINT [ "/app/bitwarden-secrets-operator" ]
