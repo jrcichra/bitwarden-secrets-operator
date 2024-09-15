@@ -52,24 +52,21 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Cache target directory
-        id: cache-target
-        uses: actions/cache@v4
-        with:
-          path: target
-          key: ${{ runner.os }}
-      - name: Build for x86_64
-        uses: actions-rs/cargo@v1
-        with:
-          use-cross: true
-          command: build
-          args: --target x86_64-unknown-linux-gnu --release
+      - uses: Swatinem/rust-cache@v2
       - name: Build for aarch64
-        uses: actions-rs/cargo@v1
+        uses: houseabsolute/actions-rust-cross@v0
         with:
           use-cross: true
           command: build
-          args: --target aarch64-unknown-linux-gnu --release
+          target: aarch64-unknown-linux-gnu
+          args: --release
+      - name: Build for x86_64
+        uses: houseabsolute/actions-rust-cross@v0
+        with:
+          use-cross: true
+          command: build
+          target: x86_64-unknown-linux-gnu
+          args: --release
       - uses: docker/build-push-action@v6
         with:
           context: .
@@ -77,8 +74,6 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.prep.outputs.tags }}
-          cache-from: type=registry,ref=ghcr.io/jrcichra/bitwarden-secrets-operator:buildcache
-          cache-to: type=registry,ref=ghcr.io/jrcichra/bitwarden-secrets-operator:buildcache,mode=max
           labels: |
             org.opencontainers.image.title=${{ fromJson(steps.repo.outputs.result).name }}
             org.opencontainers.image.description=${{ fromJson(steps.repo.outputs.result).description }}
