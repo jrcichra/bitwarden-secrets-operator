@@ -284,7 +284,7 @@ dependencies = [
  "futures",
  "gethostname",
  "k8s-openapi",
- "kube 0.94.2",
+ "kube",
  "kube-leader-election",
  "lazy_static",
  "prometheus",
@@ -1065,60 +1065,15 @@ dependencies = [
 
 [[package]]
 name = "kube"
-version = "0.93.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0365920075af1a2d23619c1ca801c492f2400157de42627f041a061716e76416"
-dependencies = [
- "k8s-openapi",
- "kube-client 0.93.1",
- "kube-core 0.93.1",
-]
-
-[[package]]
-name = "kube"
 version = "0.94.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "52ace78a62b361077505f2950bd48aa3e46596fb15350c9c993de15ddfa3cac5"
 dependencies = [
  "k8s-openapi",
- "kube-client 0.94.2",
- "kube-core 0.94.2",
+ "kube-client",
+ "kube-core",
  "kube-derive",
  "kube-runtime",
-]
-
-[[package]]
-name = "kube-client"
-version = "0.93.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d81336eb3a5b10a40c97a5a97ad66622e92bad942ce05ee789edd730aa4f8603"
-dependencies = [
- "base64 0.22.1",
- "bytes",
- "chrono",
- "either",
- "futures",
- "home",
- "http",
- "http-body",
- "http-body-util",
- "hyper",
- "hyper-timeout",
- "hyper-util",
- "jsonpath-rust",
- "k8s-openapi",
- "kube-core 0.93.1",
- "pem",
- "secrecy",
- "serde",
- "serde_json",
- "serde_yaml",
- "thiserror",
- "tokio",
- "tokio-util",
- "tower",
- "tower-http",
- "tracing",
 ]
 
 [[package]]
@@ -1143,7 +1098,7 @@ dependencies = [
  "hyper-util",
  "jsonpath-rust",
  "k8s-openapi",
- "kube-core 0.94.2",
+ "kube-core",
  "pem",
  "rustls",
  "rustls-pemfile",
@@ -1157,21 +1112,6 @@ dependencies = [
  "tower",
  "tower-http",
  "tracing",
-]
-
-[[package]]
-name = "kube-core"
-version = "0.93.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cce373a74d787d439063cdefab0f3672860bd7bac01a38e39019177e764a0fe6"
-dependencies = [
- "chrono",
- "form_urlencoded",
- "http",
- "k8s-openapi",
- "serde",
- "serde_json",
- "thiserror",
 ]
 
 [[package]]
@@ -1207,13 +1147,13 @@ dependencies = [
 
 [[package]]
 name = "kube-leader-election"
-version = "0.34.0"
+version = "0.35.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6ce0d1ef9f6a59390d4c3f93a611362b3ef576e712e70a6b66cbef92fb31cbb1"
+checksum = "867d7900993aebc296b2c74ed907884fede8ed16e8f53699b79859474f25b3a0"
 dependencies = [
  "chrono",
  "k8s-openapi",
- "kube 0.93.1",
+ "kube",
  "log",
  "serde",
  "serde_json",
@@ -1237,7 +1177,7 @@ dependencies = [
  "json-patch",
  "jsonptr",
  "k8s-openapi",
- "kube-client 0.94.2",
+ "kube-client",
  "parking_lot",
  "pin-project",
  "serde",
