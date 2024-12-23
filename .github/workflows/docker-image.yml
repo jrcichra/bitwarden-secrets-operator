@@ -58,14 +58,14 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - uses: Swatinem/rust-cache@v2
       - name: Build for aarch64
-        uses: houseabsolute/actions-rust-cross@v0
+        uses: houseabsolute/actions-rust-cross@v1
         with:
           use-cross: true
           command: build
           target: aarch64-unknown-linux-gnu
           args: --release
       - name: Build for x86_64
-        uses: houseabsolute/actions-rust-cross@v0
+        uses: houseabsolute/actions-rust-cross@v1
         with:
           use-cross: true
           command: build
