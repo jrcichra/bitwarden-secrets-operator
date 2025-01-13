@@ -11,7 +11,7 @@ axum = "0.8.1"
 chrono = "0.4.39"
 clap = { version = "4.5.26", features = ["derive", "env"] }
 ctrlc = { version = "3.4.5", features = ["termination"] }
-dirs = "5.0.1"
+dirs = "6.0.0"
 futures = "0.3.31"
 gethostname = "0.5.0"
 k8s-openapi = { version = "0.24.0", features = ["latest"] }
