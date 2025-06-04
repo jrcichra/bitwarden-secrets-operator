@@ -4,7 +4,7 @@ COPY target/aarch64-unknown-linux-gnu/release/bitwarden-secrets-operator bitward
 COPY target/x86_64-unknown-linux-gnu/release/bitwarden-secrets-operator bitwarden-secrets-operator-amd64
 
 # lts node
-FROM node:20.16.0-bookworm-slim
+FROM node:22.16.0-bookworm-slim
 WORKDIR /app
 ARG TARGETARCH
 RUN npm install -g @bitwarden/cli
