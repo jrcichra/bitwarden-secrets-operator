@@ -1,3 +1,10 @@
 {
-  "extends": ["github>jrcichra/renovate-config"]
+  "extends": ["github>jrcichra/renovate-config"],
+  "packageRules": [
+    {
+      "matchManagers": ["github-actions"],
+      "matchDepNames": ["ubuntu"],
+      "enabled": false
+    }
+  ]
 }
