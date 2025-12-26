@@ -1,11 +1,9 @@
 name: docker
-
 on:
   push:
     branches:
       - main
   pull_request:
-
 jobs:
   build:
     runs-on: ubuntu-22.04
@@ -71,6 +69,12 @@ jobs:
           command: build
           target: x86_64-unknown-linux-gnu
           args: --release
+      - name: Prepare binaries for Docker
+        run: |
+          mkdir -p docker-bin
+          cp target/aarch64-unknown-linux-gnu/release/bitwarden-secrets-operator docker-bin/bitwarden-secrets-operator-arm64
+          cp target/x86_64-unknown-linux-gnu/release/bitwarden-secrets-operator docker-bin/bitwarden-secrets-operator-amd64
+          ls -lh docker-bin/
       - uses: docker/build-push-action@v6
         with:
           context: .

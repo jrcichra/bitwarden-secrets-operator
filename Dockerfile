@@ -1,7 +1,7 @@
 FROM busybox:1.37.0 AS rename
 WORKDIR /app
-COPY target/aarch64-unknown-linux-gnu/release/bitwarden-secrets-operator bitwarden-secrets-operator-arm64
-COPY target/x86_64-unknown-linux-gnu/release/bitwarden-secrets-operator bitwarden-secrets-operator-amd64
+COPY docker-bin/bitwarden-secrets-operator-arm64 bitwarden-secrets-operator-arm64
+COPY docker-bin/bitwarden-secrets-operator-amd64 bitwarden-secrets-operator-amd64
 
 # lts node
 FROM node:24.11.0-bookworm-slim
