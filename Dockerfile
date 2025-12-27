@@ -4,7 +4,7 @@ COPY docker-bin/bitwarden-secrets-operator-arm64 bitwarden-secrets-operator-arm6
 COPY docker-bin/bitwarden-secrets-operator-amd64 bitwarden-secrets-operator-amd64
 
 # lts node
-FROM node:24.11.0-bookworm-slim
+FROM node:24.12.0-bookworm-slim
 WORKDIR /app
 ARG TARGETARCH
 RUN npm install -g @bitwarden/cli@2025.4.0
