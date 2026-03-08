@@ -7,7 +7,7 @@ use k8s_openapi::api::core::v1::Secret;
 use kube::runtime::watcher;
 use kube::Resource;
 use kube::{
-    api::{Api, ObjectMeta, Patch, PatchParams},
+    api::{Api, Patch, PatchParams},
     runtime::controller::{Action, Controller},
     Client, CustomResource,
 };
@@ -104,34 +104,40 @@ async fn reconcile(
     let current_time = chrono::offset::Utc::now();
     let mut annotations = BTreeMap::new();
     annotations.insert("lastReconciled".to_string(), current_time.to_rfc3339());
-    let secret = Secret {
-        metadata: ObjectMeta {
-            name: generator.metadata.name.clone(),
-            owner_references: Some(vec![oref]),
-            annotations: Some(annotations),
-            ..ObjectMeta::default()
+
+    let secret_name = generator
+        .metadata
+        .name
+        .as_ref()
+        .ok_or(ReconcileError::MissingObjectKey(".metadata.name"))?
+        .clone();
+    let namespace = generator
+        .metadata
+        .namespace
+        .as_ref()
+        .ok_or(ReconcileError::MissingObjectKey(".metadata.namespace"))?
+        .clone();
+
+    let secret_api = Api::<Secret>::namespaced(client.clone(), &namespace);
+
+    let patch = serde_json::json!({
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {
+            "name": secret_name,
+            "namespace": namespace,
+            "ownerReferences": [oref],
+            "annotations": annotations,
         },
-        string_data: Some(contents),
-        type_: type_.clone(),
-        ..Default::default()
-    };
-    let secret_api = Api::<Secret>::namespaced(
-        client.clone(),
-        generator
-            .metadata
-            .namespace
-            .as_ref()
-            .ok_or(ReconcileError::MissingObjectKey(".metadata.namespace"))?,
-    );
+        "type": type_,
+        "stringData": contents,
+    });
+
     secret_api
         .patch(
-            secret
-                .metadata
-                .name
-                .as_ref()
-                .ok_or(ReconcileError::MissingObjectKey(".metadata.name"))?,
+            &secret_name,
             &PatchParams::apply("bitwarden-secrets-operator.jrcichra.dev"),
-            &Patch::Apply(&secret),
+            &Patch::Merge(&patch),
         )
         .await
         .map_err(ReconcileError::SecretCreationFailed)?;
