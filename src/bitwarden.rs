@@ -15,9 +15,9 @@ use regex::Regex;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::error::Error;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use tokio::process::Command;
@@ -36,9 +36,7 @@ pub struct BitwardenSecretSpec {
 // Data we want access to in error/reconcile calls
 struct Data {
     client: Client,
-    session: String,
-    folder: String,
-    reconcile_interval: Duration,
+    cache: Arc<Mutex<HashMap<String, Value>>>,
 }
 
 #[derive(Debug, Error)]
@@ -51,17 +49,17 @@ enum ReconcileError {
     BitwardenError(String),
 }
 
-/// Fetch a specific secret from Bitwarden by name
-async fn get_secret_from_bitwarden(
+// collect secrets and return a hash of the results
+async fn get_secrets(
     session: &str,
     folder: &str,
-    name: &str,
-) -> Result<Value, Box<dyn Error>> {
+) -> Result<HashMap<std::string::String, serde_json::Value>, Box<dyn Error>> {
+    let mut secrets = HashMap::new();
     // sync the secrets
     let res = Command::new("bw")
         .arg("sync")
         .arg("--session")
-        .arg(session)
+        .arg(&session)
         .output()
         .await?;
     let stdout = String::from_utf8_lossy(&res.stdout).to_string();
@@ -74,9 +72,9 @@ async fn get_secret_from_bitwarden(
     let res = Command::new("bw")
         .arg("get")
         .arg("folder")
-        .arg(folder)
+        .arg(&folder)
         .arg("--session")
-        .arg(session)
+        .arg(&session)
         .output()
         .await?;
     let stdout = String::from_utf8_lossy(&res.stdout).to_string();
@@ -94,7 +92,7 @@ async fn get_secret_from_bitwarden(
         .arg("--folderid")
         .arg(folder_json["id"].as_str().unwrap())
         .arg("--session")
-        .arg(session)
+        .arg(&session)
         .output()
         .await?;
     let stdout = String::from_utf8_lossy(&res.stdout).to_string();
@@ -106,18 +104,16 @@ async fn get_secret_from_bitwarden(
     // parse stdout
     let v: Value = serde_json::from_str(&stdout)?;
 
-    // find the item with the matching name
+    // collect all secrets into the hashmap
     if let Some(arr) = v.as_array() {
         for item in arr {
-            if let Some(item_name) = item["name"].as_str() {
-                if item_name == name {
-                    return Ok(item.clone());
-                }
+            if let Some(name) = item["name"].as_str() {
+                secrets.insert(name.to_string(), item.clone());
             }
         }
     }
 
-    Err(format!("secret '{}' not found in folder '{}'", name, folder).into())
+    Ok(secrets)
 }
 
 /// Calculate exponential backoff duration
@@ -139,13 +135,13 @@ async fn reconcile(
     let type_ = &generator.spec.type_;
     let mut contents = BTreeMap::new();
 
-    // Fetch the secret from Bitwarden on-demand
-    let secret_value = match get_secret_from_bitwarden(&ctx.session, &ctx.folder, name).await {
-        Ok(value) => value,
-        Err(e) => {
+    // Get the secret from the cache
+    let secret_value = match ctx.cache.lock().unwrap().get(name) {
+        Some(value) => value.clone(),
+        None => {
             return Err(ReconcileError::BitwardenError(format!(
-                "failed to fetch secret from Bitwarden: {}",
-                e
+                "secret '{}' not found in cache",
+                name
             )));
         }
     };
@@ -229,8 +225,8 @@ async fn reconcile(
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
     prometheus::LAST_SUCCESSFUL_RECONCILE.set(now.as_secs().try_into().unwrap());
 
-    // Requeue periodically to refresh secrets from Bitwarden
-    Ok(Action::requeue(ctx.reconcile_interval))
+    // Wait for next change - cache is refreshed periodically in background
+    Ok(Action::await_change())
 }
 
 /// The controller triggers this on reconcile errors
@@ -301,10 +297,47 @@ pub async fn run(
     client: Client,
     args: Args,
     session: String,
+    cache: Arc<Mutex<HashMap<String, Value>>>,
     shutdown_rx: tokio::sync::oneshot::Receiver<()>,
 ) -> Result<(), Box<dyn Error>> {
     let bitwarden_secrets = Api::<BitwardenSecret>::all(client.clone());
     let secrets = Api::<Secret>::all(client.clone());
+
+    // Initial cache load
+    info!("loading secrets into cache...");
+    match get_secrets(&session, &args.folder).await {
+        Ok(new_secrets) => {
+            let mut cache_guard = cache.lock().unwrap();
+            *cache_guard = new_secrets;
+            info!("loaded {} secrets into cache", cache_guard.len());
+        }
+        Err(e) => {
+            warn!("failed to load initial secrets: {}", e);
+        }
+    }
+
+    // Spawn background task to refresh cache periodically
+    let session_clone = session.clone();
+    let folder_clone = args.folder.clone();
+    let cache_clone = cache.clone();
+    let reconcile_interval = Duration::from_secs(args.reconcile_interval);
+    
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(reconcile_interval).await;
+            
+            match get_secrets(&session_clone, &folder_clone).await {
+                Ok(new_secrets) => {
+                    let mut cache_guard = cache_clone.lock().unwrap();
+                    *cache_guard = new_secrets;
+                    info!("refreshed cache with {} secrets", cache_guard.len());
+                }
+                Err(e) => {
+                    warn!("failed to refresh secrets cache: {}", e);
+                }
+            }
+        }
+    });
 
     // Create a shutdown signal from the receiver
     let _shutdown_signal = async move {
@@ -320,9 +353,7 @@ pub async fn run(
             error_policy,
             Arc::new(Data {
                 client,
-                session,
-                folder: args.folder,
-                reconcile_interval: Duration::from_secs(args.reconcile_interval),
+                cache,
             }),
         )
         .for_each(|res| async move {

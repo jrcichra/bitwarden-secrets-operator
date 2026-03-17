@@ -6,7 +6,10 @@ use axum::{routing::get, Router};
 use clap::Parser;
 use kube::{Client, CustomResourceExt};
 use kube_leader_election::{LeaseLock, LeaseLockParams, LeaseLockResult};
+use serde_json::Value;
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::{fs::File, io::Write, process, thread, time::Duration};
 use tokio::net::TcpListener;
@@ -118,8 +121,11 @@ async fn main() -> Result<()> {
 
     info!("starting bitwarden-secrets-operator...");
 
+    // Create the shared cache
+    let cache = Arc::new(Mutex::new(HashMap::<String, Value>::new()));
+
     let controller_handle = tokio::spawn(async move {
-        bitwarden::run(client, args, session, shutdown_rx).await.unwrap();
+        bitwarden::run(client, args, session, cache, shutdown_rx).await.unwrap();
     });
 
     info!("starting metrics http server...");
