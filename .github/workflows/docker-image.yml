@@ -72,8 +72,21 @@ jobs:
       - name: Prepare binaries for Docker
         run: |
           mkdir -p docker-bin
-          cp target/aarch64-unknown-linux-gnu/release/bitwarden-secrets-operator docker-bin/bitwarden-secrets-operator-arm64
-          cp target/x86_64-unknown-linux-gnu/release/bitwarden-secrets-operator docker-bin/bitwarden-secrets-operator-amd64
+          # Find the binaries (cross may place them in different locations)
+          find target -name "bitwarden-secrets-operator" -type f -ls
+          # Copy binaries if they exist
+          if [ -f "target/aarch64-unknown-linux-gnu/release/bitwarden-secrets-operator" ]; then
+            cp target/aarch64-unknown-linux-gnu/release/bitwarden-secrets-operator docker-bin/bitwarden-secrets-operator-arm64
+          else
+            echo "ERROR: ARM64 binary not found"
+            exit 1
+          fi
+          if [ -f "target/x86_64-unknown-linux-gnu/release/bitwarden-secrets-operator" ]; then
+            cp target/x86_64-unknown-linux-gnu/release/bitwarden-secrets-operator docker-bin/bitwarden-secrets-operator-amd64
+          else
+            echo "ERROR: AMD64 binary not found"
+            exit 1
+          fi
           ls -lh docker-bin/
       - uses: docker/build-push-action@v6
         with:
