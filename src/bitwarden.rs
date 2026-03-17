@@ -301,7 +301,6 @@ pub async fn run(
     shutdown_rx: tokio::sync::oneshot::Receiver<()>,
 ) -> Result<(), Box<dyn Error>> {
     let bitwarden_secrets = Api::<BitwardenSecret>::all(client.clone());
-    let secrets = Api::<Secret>::all(client.clone());
 
     // Initial cache load
     info!("loading secrets into cache...");
@@ -346,7 +345,6 @@ pub async fn run(
     };
 
     Controller::new(bitwarden_secrets, watcher::Config::default())
-        .owns(secrets, watcher::Config::default())
         .shutdown_on_signal()
         .run(
             reconcile,
