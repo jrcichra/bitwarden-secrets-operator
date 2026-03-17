@@ -5,7 +5,7 @@ use anyhow::Result;
 use axum::{routing::get, Router};
 use clap::Parser;
 use kube::{Client, CustomResourceExt};
-use kube_leader_election::{LeaseLock, LeaseLockParams};
+use kube_leader_election::{LeaseLock, LeaseLockParams, LeaseLockResult};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::{fs::File, io::Write, process, thread, time::Duration};
@@ -75,7 +75,7 @@ async fn main() -> Result<()> {
     info!("waiting for lock...");
     loop {
         let lease = leadership.try_acquire_or_renew().await?;
-        if lease.acquired_lease {
+        if matches!(lease, LeaseLockResult::Acquired(_)) {
             break;
         }
         thread::sleep(Duration::from_secs(5));
@@ -103,7 +103,7 @@ async fn main() -> Result<()> {
                     continue;
                 }
             };
-            if !lease.acquired_lease {
+            if matches!(lease, LeaseLockResult::NotAcquired(_)) {
                 info!("lost lease, triggering graceful shutdown...");
                 let _ = shutdown_tx.send(());
                 break;
