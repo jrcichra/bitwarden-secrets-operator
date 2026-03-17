@@ -1,6 +1,7 @@
 use super::prometheus;
 use crate::Args;
 use anyhow::Result;
+use chrono;
 use futures::StreamExt;
 use k8s_openapi::api::core::v1::Secret;
 use kube::runtime::watcher;
@@ -184,6 +185,9 @@ async fn reconcile(
     }
 
     let oref = generator.controller_owner_ref(&()).unwrap();
+    let current_time = chrono::offset::Utc::now();
+    let mut annotations = BTreeMap::new();
+    annotations.insert("lastReconciled".to_string(), current_time.to_rfc3339());
 
     let secret_name = generator
         .metadata
@@ -207,6 +211,7 @@ async fn reconcile(
             "name": secret_name,
             "namespace": namespace,
             "ownerReferences": [oref],
+            "annotations": annotations,
         },
         "type": type_,
         "stringData": contents,
