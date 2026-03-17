@@ -54,6 +54,7 @@ async fn get_secrets(
     folder: &str,
 ) -> Result<HashMap<std::string::String, serde_json::Value>, Box<dyn Error>> {
     let mut secrets = HashMap::new();
+    info!("loading secrets from folder '{}'", folder);
     // sync the secrets
     let res = Command::new("bw")
         .arg("sync")
@@ -112,6 +113,7 @@ async fn get_secrets(
         }
     }
 
+    info!("loaded {} secrets from folder '{}'", secrets.len(), folder);
     Ok(secrets)
 }
 
@@ -135,13 +137,18 @@ async fn reconcile(
     let mut contents = BTreeMap::new();
 
     // Get the secret from the cache
-    let secret_value = match ctx.cache.lock().unwrap().get(name) {
-        Some(value) => value.clone(),
-        None => {
-            return Err(ReconcileError::BitwardenError(format!(
-                "secret '{}' not found in cache",
-                name
-            )));
+    let secret_value = {
+        let cache_guard = ctx.cache.lock().unwrap();
+        let cache_keys: Vec<String> = cache_guard.keys().cloned().collect();
+        info!("looking for secret '{}' in cache with {} items: {:?}", name, cache_guard.len(), cache_keys);
+        match cache_guard.get(name) {
+            Some(value) => value.clone(),
+            None => {
+                return Err(ReconcileError::BitwardenError(format!(
+                    "secret '{}' not found in cache (available: {:?})",
+                    name, cache_keys
+                )));
+            }
         }
     };
 
