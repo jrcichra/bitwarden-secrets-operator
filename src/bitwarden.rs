@@ -38,6 +38,7 @@ struct Data {
     client: Client,
     session: String,
     folder: String,
+    reconcile_interval: Duration,
 }
 
 #[derive(Debug, Error)]
@@ -228,8 +229,8 @@ async fn reconcile(
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
     prometheus::LAST_SUCCESSFUL_RECONCILE.set(now.as_secs().try_into().unwrap());
 
-    // No need for periodic requeue - we watch for changes
-    Ok(Action::await_change())
+    // Requeue periodically to refresh secrets from Bitwarden
+    Ok(Action::requeue(ctx.reconcile_interval))
 }
 
 /// The controller triggers this on reconcile errors
@@ -321,6 +322,7 @@ pub async fn run(
                 client,
                 session,
                 folder: args.folder,
+                reconcile_interval: Duration::from_secs(args.reconcile_interval),
             }),
         )
         .for_each(|res| async move {

@@ -18,6 +18,8 @@ use tracing::{info, warn};
 pub struct Args {
     #[clap(long, env, default_value = "kubernetes")]
     folder: String,
+    #[clap(long, env, default_value_t = 60 * 10)]
+    reconcile_interval: u64,
     #[clap(long, env, default_value_t = false)]
     generate_crd: bool,
     #[clap(long, env, default_value_t = 8000)]
