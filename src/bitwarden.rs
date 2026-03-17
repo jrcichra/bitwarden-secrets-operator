@@ -139,14 +139,12 @@ async fn reconcile(
     // Get the secret from the cache
     let secret_value = {
         let cache_guard = ctx.cache.lock().unwrap();
-        let cache_keys: Vec<String> = cache_guard.keys().cloned().collect();
-        info!("looking for secret '{}' in cache with {} items: {:?}", name, cache_guard.len(), cache_keys);
         match cache_guard.get(name) {
             Some(value) => value.clone(),
             None => {
                 return Err(ReconcileError::BitwardenError(format!(
-                    "secret '{}' not found in cache (available: {:?})",
-                    name, cache_keys
+                    "secret '{}' not found in cache",
+                    name
                 )));
             }
         }
