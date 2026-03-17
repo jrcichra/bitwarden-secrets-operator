@@ -37,6 +37,7 @@ pub struct BitwardenSecretSpec {
 struct Data {
     client: Client,
     cache: Arc<Mutex<HashMap<String, Value>>>,
+    reconcile_interval: Duration,
 }
 
 #[derive(Debug, Error)]
@@ -230,8 +231,8 @@ async fn reconcile(
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
     prometheus::LAST_SUCCESSFUL_RECONCILE.set(now.as_secs().try_into().unwrap());
 
-    // Wait for next change - cache is refreshed periodically in background
-    Ok(Action::await_change())
+    // Requeue periodically to refresh secret from cache
+    Ok(Action::requeue(ctx.reconcile_interval))
 }
 
 /// The controller triggers this on reconcile errors
@@ -357,6 +358,7 @@ pub async fn run(
             Arc::new(Data {
                 client,
                 cache,
+                reconcile_interval,
             }),
         )
         .for_each(|res| async move {
