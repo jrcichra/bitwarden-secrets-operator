@@ -7,6 +7,6 @@ COPY docker-bin/bitwarden-secrets-operator-amd64 bitwarden-secrets-operator-amd6
 FROM node:24.14.0-bookworm-slim
 WORKDIR /app
 ARG TARGETARCH
-RUN npm install -g @bitwarden/cli@2025.4.0
+RUN npm install -g @bitwarden/cli@2026.2.0
 COPY --from=rename /app/bitwarden-secrets-operator-$TARGETARCH /app/bitwarden-secrets-operator
 ENTRYPOINT [ "/app/bitwarden-secrets-operator" ]
