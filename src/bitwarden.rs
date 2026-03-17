@@ -11,14 +11,13 @@ use kube::{
     runtime::controller::{Action, Controller},
     Client, CustomResource,
 };
-use lazy_static::lazy_static;
 use regex::Regex;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::error::Error;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use tokio::process::Command;
@@ -33,10 +32,12 @@ pub struct BitwardenSecretSpec {
     #[serde(rename = "type")]
     type_: Option<String>,
 }
+
 // Data we want access to in error/reconcile calls
 struct Data {
     client: Client,
-    cache: Arc<Mutex<HashMap<String, serde_json::Value>>>,
+    session: String,
+    folder: String,
 }
 
 #[derive(Debug, Error)]
@@ -49,6 +50,83 @@ enum ReconcileError {
     BitwardenError(String),
 }
 
+/// Fetch a specific secret from Bitwarden by name
+async fn get_secret_from_bitwarden(
+    session: &str,
+    folder: &str,
+    name: &str,
+) -> Result<Value, Box<dyn Error>> {
+    // sync the secrets
+    let res = Command::new("bw")
+        .arg("sync")
+        .arg("--session")
+        .arg(session)
+        .output()
+        .await?;
+    let stdout = String::from_utf8_lossy(&res.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&res.stderr).to_string();
+    if !res.status.success() {
+        return Err(format!("sync failed: stdout: {}\nstderr: {}", stdout, stderr).into());
+    }
+
+    // get the id of the provided folder
+    let res = Command::new("bw")
+        .arg("get")
+        .arg("folder")
+        .arg(folder)
+        .arg("--session")
+        .arg(session)
+        .output()
+        .await?;
+    let stdout = String::from_utf8_lossy(&res.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&res.stderr).to_string();
+    if !res.status.success() {
+        return Err(format!("get folder failed: stdout: {}\nstderr: {}", stdout, stderr).into());
+    }
+
+    // parse stdout
+    let folder_json: Value = serde_json::from_str(&stdout)?;
+    // get the secrets in the provided folder
+    let res = Command::new("bw")
+        .arg("list")
+        .arg("items")
+        .arg("--folderid")
+        .arg(folder_json["id"].as_str().unwrap())
+        .arg("--session")
+        .arg(session)
+        .output()
+        .await?;
+    let stdout = String::from_utf8_lossy(&res.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&res.stderr).to_string();
+    if !res.status.success() {
+        return Err(format!("list items failed: stdout: {}\nstderr: {}", stdout, stderr).into());
+    }
+
+    // parse stdout
+    let v: Value = serde_json::from_str(&stdout)?;
+
+    // find the item with the matching name
+    if let Some(arr) = v.as_array() {
+        for item in arr {
+            if let Some(item_name) = item["name"].as_str() {
+                if item_name == name {
+                    return Ok(item.clone());
+                }
+            }
+        }
+    }
+
+    Err(format!("secret '{}' not found in folder '{}'", name, folder).into())
+}
+
+/// Calculate exponential backoff duration
+fn calculate_backoff(attempt: u32) -> Duration {
+    let base_secs = 5u64;
+    let max_secs = 300u64; // 5 minutes max
+    let backoff = base_secs.saturating_mul(2u64.saturating_pow(attempt));
+    Duration::from_secs(backoff.min(max_secs))
+}
+
 /// Controller triggers this whenever our main object or our children changed
 async fn reconcile(
     generator: Arc<BitwardenSecret>,
@@ -59,44 +137,48 @@ async fn reconcile(
     let key = &generator.spec.key;
     let type_ = &generator.spec.type_;
     let mut contents = BTreeMap::new();
-    // build the content for the secret here
-    match ctx.cache.lock().unwrap().get(name) {
-        Some(value) => match value.get("login") {
-            Some(login) => {
-                // set the username and password keys
-                contents.insert(
-                    "username".to_string(),
-                    login["username"].as_str().unwrap().to_string(),
-                );
-                contents.insert(
-                    "password".to_string(),
-                    login["password"].as_str().unwrap().to_string(),
-                );
-            }
-            None => {
-                let notes_constant = "notes";
-                let mut use_key = notes_constant;
-                if let Some(key) = key {
-                    use_key = key.as_str();
-                }
-                match value.get(notes_constant) {
-                    Some(notes) => {
-                        contents.insert(use_key.to_string(), notes.as_str().unwrap().to_string());
-                    }
-                    None => {
-                        return Err(ReconcileError::BitwardenError(format!(
-                            "card/login not found for {}",
-                            name
-                        )));
-                    }
-                }
-            }
-        },
-        None => {
+
+    // Fetch the secret from Bitwarden on-demand
+    let secret_value = match get_secret_from_bitwarden(&ctx.session, &ctx.folder, name).await {
+        Ok(value) => value,
+        Err(e) => {
             return Err(ReconcileError::BitwardenError(format!(
-                "{} not found",
-                name
+                "failed to fetch secret from Bitwarden: {}",
+                e
             )));
+        }
+    };
+
+    // build the content for the secret here
+    match secret_value.get("login") {
+        Some(login) => {
+            // set the username and password keys
+            contents.insert(
+                "username".to_string(),
+                login["username"].as_str().unwrap().to_string(),
+            );
+            contents.insert(
+                "password".to_string(),
+                login["password"].as_str().unwrap().to_string(),
+            );
+        }
+        None => {
+            let notes_constant = "notes";
+            let mut use_key = notes_constant;
+            if let Some(key) = key {
+                use_key = key.as_str();
+            }
+            match secret_value.get(notes_constant) {
+                Some(notes) => {
+                    contents.insert(use_key.to_string(), notes.as_str().unwrap().to_string());
+                }
+                None => {
+                    return Err(ReconcileError::BitwardenError(format!(
+                        "card/login not found for {}",
+                        name
+                    )));
+                }
+            }
         }
     }
 
@@ -146,81 +228,27 @@ async fn reconcile(
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
     prometheus::LAST_SUCCESSFUL_RECONCILE.set(now.as_secs().try_into().unwrap());
 
-    Ok(Action::requeue(Duration::from_secs(300)))
-}
-
-// collect secrets and return a hash of the results
-async fn get_secrets(
-    session: &str,
-    folder: &str,
-) -> Result<HashMap<std::string::String, serde_json::Value>, Box<dyn Error>> {
-    let mut secrets = HashMap::new();
-    // sync the secrets
-    let res = Command::new("bw")
-        .arg("sync")
-        .arg("--session")
-        .arg(&session)
-        .output()
-        .await?;
-    let stdout = String::from_utf8_lossy(&res.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&res.stderr).to_string();
-    if !res.status.success() {
-        return Err(format!("sync failed: stdout: {}\nstderr: {}", stdout, stderr).into());
-    }
-
-    // get the id of the provided folder
-    let res = Command::new("bw")
-        .arg("get")
-        .arg("folder")
-        .arg(&folder)
-        .arg("--session")
-        .arg(&session)
-        .output()
-        .await?;
-    let stdout = String::from_utf8_lossy(&res.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&res.stderr).to_string();
-    if !res.status.success() {
-        return Err(format!("get folder failed: stdout: {}\nstderr: {}", stdout, stderr).into());
-    }
-
-    // parse stdout
-    let folder_json: Value = serde_json::from_str(&stdout)?;
-    // get the secrets in the provided folder
-    let res = Command::new("bw")
-        .arg("list")
-        .arg("items")
-        .arg("--folderid")
-        .arg(folder_json["id"].as_str().unwrap())
-        .arg("--session")
-        .arg(&session)
-        .output()
-        .await?;
-    let stdout = String::from_utf8_lossy(&res.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&res.stderr).to_string();
-    if !res.status.success() {
-        return Err(format!("list items failed: stdout: {}\nstderr: {}", stdout, stderr).into());
-    }
-
-    // parse stdout
-    let v: Value = serde_json::from_str(&stdout)?;
-
-    // loop through each item
-    if let Some(arr) = v.as_array() {
-        for item in arr {
-            if let Some(str) = item["name"].as_str() {
-                secrets.insert(str.to_string(), item.clone());
-            } else {
-                warn!("Could not decode item into string :{:?}", item);
-            }
-        }
-    }
-
-    Ok(secrets)
+    // No need for periodic requeue - we watch for changes
+    Ok(Action::await_change())
 }
 
 /// The controller triggers this on reconcile errors
-fn error_policy(_object: Arc<BitwardenSecret>, _error: &ReconcileError, _ctx: Arc<Data>) -> Action {
-    Action::requeue(Duration::from_secs(30))
+fn error_policy(object: Arc<BitwardenSecret>, error: &ReconcileError, _ctx: Arc<Data>) -> Action {
+    let name = object
+        .metadata
+        .name
+        .as_ref()
+        .unwrap_or(&"unknown".to_string())
+        .clone();
+
+    warn!(
+        "reconcile failed for {}: {:?}",
+        name, error
+    );
+
+    // Use exponential backoff with max of 5 minutes
+    let backoff = calculate_backoff(1);
+    Action::requeue(backoff)
 }
 
 pub async fn login() -> Result<String, Box<dyn Error>> {
@@ -256,7 +284,7 @@ pub async fn login() -> Result<String, Box<dyn Error>> {
     }
 
     // the session key is within the stdout of this command
-    lazy_static! {
+    lazy_static::lazy_static! {
         static ref RE: Regex = Regex::new("export BW_SESSION=\"(.*)\"").unwrap();
     }
 
@@ -268,66 +296,33 @@ pub async fn login() -> Result<String, Box<dyn Error>> {
     Err(format!("could not find BW_SESSION in unlock output").into())
 }
 
-pub async fn run(client: Client, args: Args, session: String) -> Result<(), Box<dyn Error>> {
-    let cmgs = Api::<BitwardenSecret>::all(client.clone());
-    let cms = Api::<BitwardenSecret>::all(client.clone());
-    let cache = Arc::new(Mutex::new(HashMap::new()));
+pub async fn run(
+    client: Client,
+    args: Args,
+    session: String,
+    shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+) -> Result<(), Box<dyn Error>> {
+    let bitwarden_secrets = Api::<BitwardenSecret>::all(client.clone());
+    let secrets = Api::<Secret>::all(client.clone());
 
-    let (mut reload_tx, reload_rx) = futures::channel::mpsc::channel(0);
+    // Create a shutdown signal from the receiver
+    let _shutdown_signal = async move {
+        let _ = shutdown_rx.await;
+        info!("received shutdown signal, stopping controller...");
+    };
 
-    // Reconcile loop timer
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(args.reconcile_interval));
-        loop {
-            interval.tick().await;
-            info!(
-                "interval of {} seconds triggering reconcile loop",
-                args.reconcile_interval
-            );
-            reload_tx
-                .try_send(())
-                .expect("could not trigger reconcile loop");
-        }
-    });
-    let cache_gather = Arc::clone(&cache);
-    let folder = args.folder.clone();
-    let session_clone = session.clone();
-    // Secret Gatherer timer - independent of reconciliation since it grabs all secrets at once
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(args.secret_interval));
-        loop {
-            interval.tick().await;
-            info!(
-                "interval of {} seconds triggering secret gather loop",
-                args.secret_interval
-            );
-            match get_secrets(&session, &folder).await {
-                Ok(secrets) => {
-                    // update the cache
-                    cache_gather.lock().unwrap().clone_from(&secrets);
-                }
-                Err(e) => {
-                    warn!("secret gatherer failed {:?}", e)
-                }
-            }
-        }
-    });
-    // run secret grabber once at the start
-    match get_secrets(&session_clone, &args.folder).await {
-        Ok(secrets) => {
-            // update the cache
-            cache.lock().unwrap().clone_from(&secrets);
-        }
-        Err(e) => {
-            warn!("secret gatherer failed {:?}", e)
-        }
-    }
-
-    Controller::new(cmgs, watcher::Config::default())
-        .owns(cms, watcher::Config::default())
-        .reconcile_all_on(reload_rx.map(|_| ()))
+    Controller::new(bitwarden_secrets, watcher::Config::default())
+        .owns(secrets, watcher::Config::default())
         .shutdown_on_signal()
-        .run(reconcile, error_policy, Arc::new(Data { client, cache }))
+        .run(
+            reconcile,
+            error_policy,
+            Arc::new(Data {
+                client,
+                session,
+                folder: args.folder,
+            }),
+        )
         .for_each(|res| async move {
             match res {
                 Ok(o) => info!("reconciled {:?}", o),
@@ -335,5 +330,7 @@ pub async fn run(client: Client, args: Args, session: String) -> Result<(), Box<
             }
         })
         .await;
+    
+    info!("controller stopped gracefully");
     Ok(())
 }

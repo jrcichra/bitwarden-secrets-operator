@@ -6,8 +6,11 @@ use axum::{routing::get, Router};
 use clap::Parser;
 use kube::{Client, CustomResourceExt};
 use kube_leader_election::{LeaseLock, LeaseLockParams};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{fs::File, io::Write, process, thread, time::Duration};
 use tokio::net::TcpListener;
+use tokio::sync::oneshot;
 use tracing::{info, warn};
 
 #[derive(Parser, Debug, Clone)]
@@ -15,10 +18,6 @@ use tracing::{info, warn};
 pub struct Args {
     #[clap(long, env, default_value = "kubernetes")]
     folder: String,
-    #[clap(long, env,default_value_t = 60 * 5)]
-    reconcile_interval: u64,
-    #[clap(long, env,default_value_t = 60 * 2)]
-    secret_interval: u64,
     #[clap(long, env, default_value_t = false)]
     generate_crd: bool,
     #[clap(long, env, default_value_t = 8000)]
@@ -37,8 +36,12 @@ fn write_file(path: String, content: String) -> std::io::Result<()> {
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
 
+    let shutdown_requested = Arc::new(AtomicBool::new(false));
+    let shutdown_requested_ctrlc = shutdown_requested.clone();
+
     ctrlc::set_handler(move || {
-        process::exit(0);
+        info!("received SIGINT, shutting down gracefully...");
+        shutdown_requested_ctrlc.store(true, Ordering::SeqCst);
     })?;
 
     let args = Args::parse();
@@ -77,10 +80,20 @@ async fn main() -> Result<()> {
     }
     info!("acquired lock!");
 
-    // start a background thread to see if we're still leader
+    // Create channels for graceful shutdown coordination
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let shutdown_triggered = Arc::new(AtomicBool::new(false));
+    let shutdown_triggered_leader = shutdown_triggered.clone();
+
+    // start a background task to see if we're still leader
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_secs(5)).await;
+            
+            if shutdown_triggered_leader.load(Ordering::SeqCst) {
+                break;
+            }
+            
             let lease = match leadership.try_acquire_or_renew().await {
                 Ok(l) => l,
                 Err(e) => {
@@ -89,8 +102,9 @@ async fn main() -> Result<()> {
                 }
             };
             if !lease.acquired_lease {
-                info!("lost lease, exiting...");
-                process::exit(1);
+                info!("lost lease, triggering graceful shutdown...");
+                let _ = shutdown_tx.send(());
+                break;
             }
         }
     });
@@ -101,9 +115,11 @@ async fn main() -> Result<()> {
     info!("logged in to bitwarden");
 
     info!("starting bitwarden-secrets-operator...");
-    tokio::spawn(async move {
-        bitwarden::run(client, args, session).await.unwrap();
+
+    let controller_handle = tokio::spawn(async move {
+        bitwarden::run(client, args, session, shutdown_rx).await.unwrap();
     });
+
     info!("starting metrics http server...");
 
     let app = Router::new().route("/metrics", get(prometheus::gather_metrics));
@@ -111,6 +127,26 @@ async fn main() -> Result<()> {
     let bind = format!("0.0.0.0:{}", metrics_port);
     let listener = TcpListener::bind(&bind).await?;
     info!("listening on {}", &bind);
-    axum::serve(listener, app).await?;
+    
+    // Run both the controller and metrics server concurrently with shutdown support
+    tokio::select! {
+        result = axum::serve(listener, app) => {
+            result?;
+        }
+        _ = controller_handle => {
+            info!("controller task completed");
+        }
+        _ = async {
+            loop {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                if shutdown_requested.load(Ordering::SeqCst) {
+                    break;
+                }
+            }
+        } => {
+            info!("shutdown requested via SIGINT");
+        }
+    }
+    
     Ok(())
 }
