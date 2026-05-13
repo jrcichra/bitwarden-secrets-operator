@@ -222,7 +222,7 @@ async fn reconcile(
         .patch(
             &secret_name,
             &PatchParams::apply("bitwarden-secrets-operator.jrcichra.dev"),
-            &Patch::Merge(&patch),
+            &Patch::Apply(&patch),
         )
         .await
         .map_err(ReconcileError::SecretCreationFailed)?;
