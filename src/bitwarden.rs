@@ -221,7 +221,7 @@ async fn reconcile(
     secret_api
         .patch(
             &secret_name,
-            &PatchParams::apply("bitwarden-secrets-operator.jrcichra.dev"),
+            &PatchParams::apply("bitwarden-secrets-operator.jrcichra.dev").force(),
             &Patch::Apply(&patch),
         )
         .await
