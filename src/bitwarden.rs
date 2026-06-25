@@ -1,6 +1,6 @@
 use super::prometheus;
 use crate::Args;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono;
 use futures::StreamExt;
 use k8s_openapi::api::core::v1::Secret;
@@ -78,7 +78,13 @@ async fn get_secrets(session: &str, folder: &str) -> anyhow::Result<HashMap<Stri
             String::from_utf8_lossy(&res.stderr)
         );
     }
-    let folder_json: Value = serde_json::from_slice(&res.stdout)?;
+    let folder_json: Value = serde_json::from_slice(&res.stdout).with_context(|| {
+        format!(
+            "get folder returned non-JSON (stdout: {:?}, stderr: {:?})",
+            String::from_utf8_lossy(&res.stdout),
+            String::from_utf8_lossy(&res.stderr)
+        )
+    })?;
 
     let res = Command::new("bw")
         .args([
@@ -98,7 +104,13 @@ async fn get_secrets(session: &str, folder: &str) -> anyhow::Result<HashMap<Stri
             String::from_utf8_lossy(&res.stderr)
         );
     }
-    let v: Value = serde_json::from_slice(&res.stdout)?;
+    let v: Value = serde_json::from_slice(&res.stdout).with_context(|| {
+        format!(
+            "list items returned non-JSON (stdout: {:?}, stderr: {:?})",
+            String::from_utf8_lossy(&res.stdout),
+            String::from_utf8_lossy(&res.stderr)
+        )
+    })?;
 
     if let Some(arr) = v.as_array() {
         for item in arr {
