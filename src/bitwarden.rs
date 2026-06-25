@@ -51,62 +51,55 @@ enum ReconcileError {
 }
 
 // collect secrets and return a hash of the results
-async fn get_secrets(
-    session: &str,
-    folder: &str,
-) -> Result<HashMap<std::string::String, serde_json::Value>, Box<dyn Error>> {
+async fn get_secrets(session: &str, folder: &str) -> anyhow::Result<HashMap<String, Value>> {
     let mut secrets = HashMap::new();
     info!("loading secrets from folder '{}'", folder);
-    // sync the secrets
+
     let res = Command::new("bw")
-        .arg("sync")
-        .arg("--session")
-        .arg(&session)
+        .args(["sync", "--session", session])
         .output()
         .await?;
-    let stdout = String::from_utf8_lossy(&res.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&res.stderr).to_string();
     if !res.status.success() {
-        return Err(format!("sync failed: stdout: {}\nstderr: {}", stdout, stderr).into());
+        anyhow::bail!(
+            "sync failed: stdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&res.stdout),
+            String::from_utf8_lossy(&res.stderr)
+        );
     }
 
-    // get the id of the provided folder
     let res = Command::new("bw")
-        .arg("get")
-        .arg("folder")
-        .arg(&folder)
-        .arg("--session")
-        .arg(&session)
+        .args(["get", "folder", folder, "--session", session])
         .output()
         .await?;
-    let stdout = String::from_utf8_lossy(&res.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&res.stderr).to_string();
     if !res.status.success() {
-        return Err(format!("get folder failed: stdout: {}\nstderr: {}", stdout, stderr).into());
+        anyhow::bail!(
+            "get folder failed: stdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&res.stdout),
+            String::from_utf8_lossy(&res.stderr)
+        );
     }
+    let folder_json: Value = serde_json::from_slice(&res.stdout)?;
 
-    // parse stdout
-    let folder_json: Value = serde_json::from_str(&stdout)?;
-    // get the secrets in the provided folder
     let res = Command::new("bw")
-        .arg("list")
-        .arg("items")
-        .arg("--folderid")
-        .arg(folder_json["id"].as_str().unwrap())
-        .arg("--session")
-        .arg(&session)
+        .args([
+            "list",
+            "items",
+            "--folderid",
+            folder_json["id"].as_str().unwrap(),
+            "--session",
+            session,
+        ])
         .output()
         .await?;
-    let stdout = String::from_utf8_lossy(&res.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&res.stderr).to_string();
     if !res.status.success() {
-        return Err(format!("list items failed: stdout: {}\nstderr: {}", stdout, stderr).into());
+        anyhow::bail!(
+            "list items failed: stdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&res.stdout),
+            String::from_utf8_lossy(&res.stderr)
+        );
     }
+    let v: Value = serde_json::from_slice(&res.stdout)?;
 
-    // parse stdout
-    let v: Value = serde_json::from_str(&stdout)?;
-
-    // collect all secrets into the hashmap
     if let Some(arr) = v.as_array() {
         for item in arr {
             if let Some(name) = item["name"].as_str() {
@@ -254,49 +247,56 @@ fn error_policy(object: Arc<BitwardenSecret>, error: &ReconcileError, _ctx: Arc<
     Action::requeue(backoff)
 }
 
-pub async fn login() -> Result<String, Box<dyn Error>> {
-    // logout in case already logged in
+pub async fn login() -> anyhow::Result<String> {
     Command::new("bw").arg("logout").output().await?;
 
-    // first login with --apikey
-    let res = Command::new("bw")
-        .arg("login")
-        .arg("--apikey")
-        .output()
-        .await?;
-    let stdout = String::from_utf8_lossy(&res.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&res.stderr).to_string();
-
+    let res = Command::new("bw").args(["login", "--apikey"]).output().await?;
     if !res.status.success() {
-        return Err(format!("login failed: stdout: {}\nstderr: {}", stdout, stderr).into());
+        anyhow::bail!(
+            "login failed: stdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&res.stdout),
+            String::from_utf8_lossy(&res.stderr)
+        );
     }
 
-    // now unlock the vault, referencing the master password in an env (from a mounted secret, hopefully)
     // TODO: this may hang if BW_PASSWORD is not set
     let res = Command::new("bw")
-        .arg("unlock")
-        .arg("--passwordenv")
-        .arg("BW_PASSWORD")
+        .args(["unlock", "--passwordenv", "BW_PASSWORD"])
         .output()
         .await?;
-    let stdout = String::from_utf8_lossy(&res.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&res.stderr).to_string();
-
+    let stdout = String::from_utf8_lossy(&res.stdout);
     if !res.status.success() {
-        return Err(format!("unlock failed: stdout: {}\nstderr: {}", stdout, stderr).into());
+        anyhow::bail!(
+            "unlock failed: stdout: {}\nstderr: {}",
+            stdout,
+            String::from_utf8_lossy(&res.stderr)
+        );
     }
 
-    // the session key is within the stdout of this command
     lazy_static::lazy_static! {
         static ref RE: Regex = Regex::new("export BW_SESSION=\"(.*)\"").unwrap();
     }
-
-    // the first match should be what we need
     for cap in RE.captures_iter(&stdout) {
         return Ok(cap[1].to_string());
     }
 
-    Err(format!("could not find BW_SESSION in unlock output").into())
+    anyhow::bail!("could not find BW_SESSION in unlock output")
+}
+
+// Returns (secrets, session) — session may be a fresh one if re-login was needed.
+async fn get_secrets_with_relogin(
+    session: String,
+    folder: &str,
+) -> anyhow::Result<(HashMap<String, Value>, String)> {
+    match get_secrets(&session, folder).await {
+        Ok(secrets) => Ok((secrets, session)),
+        Err(e) => {
+            warn!("cache refresh failed ({}), re-logging in...", e);
+            let new_session = login().await?;
+            let secrets = get_secrets(&new_session, folder).await?;
+            Ok((secrets, new_session))
+        }
+    }
 }
 
 pub async fn run(
@@ -308,13 +308,17 @@ pub async fn run(
 ) -> Result<(), Box<dyn Error>> {
     let bitwarden_secrets = Api::<BitwardenSecret>::all(client.clone());
 
-    // Initial cache load
+    let session = Arc::new(Mutex::new(session));
+
+    // Initial cache load — clone session out before awaiting to avoid holding MutexGuard across await
     info!("loading secrets into cache...");
-    match get_secrets(&session, &args.folder).await {
-        Ok(new_secrets) => {
+    let current = session.lock().unwrap().clone();
+    match get_secrets_with_relogin(current, &args.folder).await {
+        Ok((new_secrets, new_session)) => {
+            *session.lock().unwrap() = new_session;
             let mut cache_guard = cache.lock().unwrap();
+            info!("loaded {} secrets into cache", new_secrets.len());
             *cache_guard = new_secrets;
-            info!("loaded {} secrets into cache", cache_guard.len());
         }
         Err(e) => {
             warn!("failed to load initial secrets: {}", e);
@@ -326,19 +330,21 @@ pub async fn run(
     let folder_clone = args.folder.clone();
     let cache_clone = cache.clone();
     let reconcile_interval = Duration::from_secs(args.reconcile_interval);
-    
+
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(reconcile_interval).await;
-            
-            match get_secrets(&session_clone, &folder_clone).await {
-                Ok(new_secrets) => {
+
+            let current = session_clone.lock().unwrap().clone();
+            match get_secrets_with_relogin(current, &folder_clone).await {
+                Ok((new_secrets, new_session)) => {
+                    *session_clone.lock().unwrap() = new_session;
                     let mut cache_guard = cache_clone.lock().unwrap();
+                    info!("refreshed cache with {} secrets", new_secrets.len());
                     *cache_guard = new_secrets;
-                    info!("refreshed cache with {} secrets", cache_guard.len());
                 }
                 Err(e) => {
-                    warn!("failed to refresh secrets cache: {}", e);
+                    warn!("failed to refresh secrets cache (even after re-login): {}", e);
                 }
             }
         }
