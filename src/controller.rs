@@ -1,6 +1,6 @@
 use super::prometheus;
+use crate::bw::BitwardenClient;
 use crate::Args;
-use anyhow::{Context, Result};
 use chrono;
 use futures::StreamExt;
 use k8s_openapi::api::core::v1::Secret;
@@ -11,16 +11,13 @@ use kube::{
     runtime::controller::{Action, Controller},
     Client, CustomResource,
 };
-use regex::Regex;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
-use std::error::Error;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
-use tokio::process::Command;
 use tracing::{info, warn};
 
 #[derive(CustomResource, Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
@@ -33,11 +30,36 @@ pub struct BitwardenSecretSpec {
     type_: Option<String>,
 }
 
+/// Identifies a Kubernetes object for the purposes of tracking per-object retry state.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ObjectKey {
+    namespace: String,
+    name: String,
+}
+
+impl ObjectKey {
+    fn from_object(obj: &BitwardenSecret) -> Self {
+        Self {
+            namespace: obj
+                .metadata
+                .namespace
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string()),
+            name: obj
+                .metadata
+                .name
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string()),
+        }
+    }
+}
+
 // Data we want access to in error/reconcile calls
 struct Data {
     client: Client,
     cache: Arc<Mutex<HashMap<String, Value>>>,
     reconcile_interval: Duration,
+    retry_counts: Arc<Mutex<HashMap<ObjectKey, u32>>>,
 }
 
 #[derive(Debug, Error)]
@@ -48,80 +70,8 @@ enum ReconcileError {
     MissingObjectKey(&'static str),
     #[error("BitwardenError: {0}")]
     BitwardenError(String),
-}
-
-// collect secrets and return a hash of the results
-async fn get_secrets(session: &str, folder: &str) -> anyhow::Result<HashMap<String, Value>> {
-    let mut secrets = HashMap::new();
-    info!("loading secrets from folder '{}'", folder);
-
-    let res = Command::new("bw")
-        .args(["sync", "--session", session])
-        .output()
-        .await?;
-    if !res.status.success() {
-        anyhow::bail!(
-            "sync failed: stdout: {}\nstderr: {}",
-            String::from_utf8_lossy(&res.stdout),
-            String::from_utf8_lossy(&res.stderr)
-        );
-    }
-
-    let res = Command::new("bw")
-        .args(["get", "folder", folder, "--session", session])
-        .output()
-        .await?;
-    if !res.status.success() {
-        anyhow::bail!(
-            "get folder failed: stdout: {}\nstderr: {}",
-            String::from_utf8_lossy(&res.stdout),
-            String::from_utf8_lossy(&res.stderr)
-        );
-    }
-    let folder_json: Value = serde_json::from_slice(&res.stdout).with_context(|| {
-        format!(
-            "get folder returned non-JSON (stdout: {:?}, stderr: {:?})",
-            String::from_utf8_lossy(&res.stdout),
-            String::from_utf8_lossy(&res.stderr)
-        )
-    })?;
-
-    let res = Command::new("bw")
-        .args([
-            "list",
-            "items",
-            "--folderid",
-            folder_json["id"].as_str().unwrap(),
-            "--session",
-            session,
-        ])
-        .output()
-        .await?;
-    if !res.status.success() {
-        anyhow::bail!(
-            "list items failed: stdout: {}\nstderr: {}",
-            String::from_utf8_lossy(&res.stdout),
-            String::from_utf8_lossy(&res.stderr)
-        );
-    }
-    let v: Value = serde_json::from_slice(&res.stdout).with_context(|| {
-        format!(
-            "list items returned non-JSON (stdout: {:?}, stderr: {:?})",
-            String::from_utf8_lossy(&res.stdout),
-            String::from_utf8_lossy(&res.stderr)
-        )
-    })?;
-
-    if let Some(arr) = v.as_array() {
-        for item in arr {
-            if let Some(name) = item["name"].as_str() {
-                secrets.insert(name.to_string(), item.clone());
-            }
-        }
-    }
-
-    info!("loaded {} secrets from folder '{}'", secrets.len(), folder);
-    Ok(secrets)
+    #[error("InvalidSecretData: {0}")]
+    InvalidSecretData(String),
 }
 
 /// Calculate exponential backoff duration
@@ -161,14 +111,26 @@ async fn reconcile(
     match secret_value.get("login") {
         Some(login) => {
             // set the username and password keys
-            contents.insert(
-                "username".to_string(),
-                login["username"].as_str().unwrap().to_string(),
-            );
-            contents.insert(
-                "password".to_string(),
-                login["password"].as_str().unwrap().to_string(),
-            );
+            let username = login
+                .get("username")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    ReconcileError::InvalidSecretData(format!(
+                        "login item '{}' is missing a string username",
+                        name
+                    ))
+                })?;
+            let password = login
+                .get("password")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    ReconcileError::InvalidSecretData(format!(
+                        "login item '{}' is missing a string password",
+                        name
+                    ))
+                })?;
+            contents.insert("username".to_string(), username.to_string());
+            contents.insert("password".to_string(), password.to_string());
         }
         None => {
             let notes_constant = "notes";
@@ -178,7 +140,13 @@ async fn reconcile(
             }
             match secret_value.get(notes_constant) {
                 Some(notes) => {
-                    contents.insert(use_key.to_string(), notes.as_str().unwrap().to_string());
+                    let notes_str = notes.as_str().ok_or_else(|| {
+                        ReconcileError::InvalidSecretData(format!(
+                            "item '{}' has a non-string notes field",
+                            name
+                        ))
+                    })?;
+                    contents.insert(use_key.to_string(), notes_str.to_string());
                 }
                 None => {
                     return Err(ReconcileError::BitwardenError(format!(
@@ -232,83 +200,46 @@ async fn reconcile(
         .await
         .map_err(ReconcileError::SecretCreationFailed)?;
 
+    // this object succeeded, so reset any accumulated backoff for it
+    {
+        let mut retry_guard = ctx.retry_counts.lock().unwrap();
+        retry_guard.remove(&ObjectKey::from_object(&generator));
+    }
+
     // let prometheus know we started the reconcile loop
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
     prometheus::LAST_SUCCESSFUL_RECONCILE.set(now.as_secs().try_into().unwrap());
+    prometheus::RECONCILE_SUCCESS_TOTAL.inc();
 
     // Requeue periodically to refresh secret from cache
     Ok(Action::requeue(ctx.reconcile_interval))
 }
 
 /// The controller triggers this on reconcile errors
-fn error_policy(object: Arc<BitwardenSecret>, error: &ReconcileError, _ctx: Arc<Data>) -> Action {
+fn error_policy(object: Arc<BitwardenSecret>, error: &ReconcileError, ctx: Arc<Data>) -> Action {
     let name = object
         .metadata
         .name
-        .as_ref()
-        .unwrap_or(&"unknown".to_string())
-        .clone();
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string());
+    let key = ObjectKey::from_object(&object);
+
+    let attempt = {
+        let mut retry_guard = ctx.retry_counts.lock().unwrap();
+        let entry = retry_guard.entry(key).or_insert(0);
+        *entry += 1;
+        *entry
+    };
 
     warn!(
-        "reconcile failed for {}: {:?}",
-        name, error
+        "reconcile failed for {} (attempt {}): {:?}",
+        name, attempt, error
     );
 
-    // Use exponential backoff with max of 5 minutes
-    let backoff = calculate_backoff(1);
-    Action::requeue(backoff)
-}
+    prometheus::RECONCILE_FAILURE_TOTAL.inc();
 
-pub async fn login() -> anyhow::Result<String> {
-    Command::new("bw").arg("logout").output().await?;
-
-    let res = Command::new("bw").args(["login", "--apikey"]).output().await?;
-    if !res.status.success() {
-        anyhow::bail!(
-            "login failed: stdout: {}\nstderr: {}",
-            String::from_utf8_lossy(&res.stdout),
-            String::from_utf8_lossy(&res.stderr)
-        );
-    }
-
-    // TODO: this may hang if BW_PASSWORD is not set
-    let res = Command::new("bw")
-        .args(["unlock", "--passwordenv", "BW_PASSWORD"])
-        .output()
-        .await?;
-    let stdout = String::from_utf8_lossy(&res.stdout);
-    if !res.status.success() {
-        anyhow::bail!(
-            "unlock failed: stdout: {}\nstderr: {}",
-            stdout,
-            String::from_utf8_lossy(&res.stderr)
-        );
-    }
-
-    lazy_static::lazy_static! {
-        static ref RE: Regex = Regex::new("export BW_SESSION=\"(.*)\"").unwrap();
-    }
-    for cap in RE.captures_iter(&stdout) {
-        return Ok(cap[1].to_string());
-    }
-
-    anyhow::bail!("could not find BW_SESSION in unlock output")
-}
-
-// Returns (secrets, session) — session may be a fresh one if re-login was needed.
-async fn get_secrets_with_relogin(
-    session: String,
-    folder: &str,
-) -> anyhow::Result<(HashMap<String, Value>, String)> {
-    match get_secrets(&session, folder).await {
-        Ok(secrets) => Ok((secrets, session)),
-        Err(e) => {
-            warn!("cache refresh failed ({}), re-logging in...", e);
-            let new_session = login().await?;
-            let secrets = get_secrets(&new_session, folder).await?;
-            Ok((secrets, new_session))
-        }
-    }
+    // Use exponential backoff, escalating per-object, with max of 5 minutes
+    Action::requeue(calculate_backoff(attempt))
 }
 
 pub async fn run(
@@ -317,28 +248,28 @@ pub async fn run(
     session: String,
     cache: Arc<Mutex<HashMap<String, Value>>>,
     shutdown_rx: tokio::sync::oneshot::Receiver<()>,
-) -> Result<(), Box<dyn Error>> {
+) -> anyhow::Result<()> {
     let bitwarden_secrets = Api::<BitwardenSecret>::all(client.clone());
+    let bw = Arc::new(BitwardenClient::new(session));
 
-    let session = Arc::new(Mutex::new(session));
-
-    // Initial cache load — clone session out before awaiting to avoid holding MutexGuard across await
+    // Initial cache load
     info!("loading secrets into cache...");
-    let current = session.lock().unwrap().clone();
-    match get_secrets_with_relogin(current, &args.folder).await {
-        Ok((new_secrets, new_session)) => {
-            *session.lock().unwrap() = new_session;
+    match bw.get_secrets(&args.folder).await {
+        Ok(new_secrets) => {
             let mut cache_guard = cache.lock().unwrap();
             info!("loaded {} secrets into cache", new_secrets.len());
+            prometheus::CACHED_SECRETS.set(new_secrets.len() as i64);
+            prometheus::CACHE_REFRESH_SUCCESS_TOTAL.inc();
             *cache_guard = new_secrets;
         }
         Err(e) => {
             warn!("failed to load initial secrets: {}", e);
+            prometheus::CACHE_REFRESH_FAILURE_TOTAL.inc();
         }
     }
 
     // Spawn background task to refresh cache periodically
-    let session_clone = session.clone();
+    let bw_clone = bw.clone();
     let folder_clone = args.folder.clone();
     let cache_clone = cache.clone();
     let reconcile_interval = Duration::from_secs(args.reconcile_interval);
@@ -347,16 +278,17 @@ pub async fn run(
         loop {
             tokio::time::sleep(reconcile_interval).await;
 
-            let current = session_clone.lock().unwrap().clone();
-            match get_secrets_with_relogin(current, &folder_clone).await {
-                Ok((new_secrets, new_session)) => {
-                    *session_clone.lock().unwrap() = new_session;
+            match bw_clone.get_secrets(&folder_clone).await {
+                Ok(new_secrets) => {
                     let mut cache_guard = cache_clone.lock().unwrap();
                     info!("refreshed cache with {} secrets", new_secrets.len());
+                    prometheus::CACHED_SECRETS.set(new_secrets.len() as i64);
+                    prometheus::CACHE_REFRESH_SUCCESS_TOTAL.inc();
                     *cache_guard = new_secrets;
                 }
                 Err(e) => {
                     warn!("failed to refresh secrets cache (even after re-login): {}", e);
+                    prometheus::CACHE_REFRESH_FAILURE_TOTAL.inc();
                 }
             }
         }
@@ -377,6 +309,7 @@ pub async fn run(
                 client,
                 cache,
                 reconcile_interval,
+                retry_counts: Arc::new(Mutex::new(HashMap::new())),
             }),
         )
         .for_each(|res| async move {
@@ -386,7 +319,7 @@ pub async fn run(
             }
         })
         .await;
-    
+
     info!("controller stopped gracefully");
     Ok(())
 }

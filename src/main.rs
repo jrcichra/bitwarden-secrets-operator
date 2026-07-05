@@ -1,6 +1,7 @@
-pub mod bitwarden;
+pub mod bw;
+pub mod controller;
 pub mod prometheus;
-use crate::bitwarden::BitwardenSecret;
+use crate::controller::BitwardenSecret;
 use anyhow::Result;
 use axum::{routing::get, Router};
 use clap::Parser;
@@ -11,7 +12,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::{fs::File, io::Write, process, thread, time::Duration};
+use std::{fs::File, io::Write, process, time::Duration};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tracing::{info, warn};
@@ -81,7 +82,7 @@ async fn main() -> Result<()> {
         if matches!(lease, LeaseLockResult::Acquired(_)) {
             break;
         }
-        thread::sleep(Duration::from_secs(5));
+        tokio::time::sleep(Duration::from_secs(5)).await;
     }
     info!("acquired lock!");
 
@@ -116,7 +117,7 @@ async fn main() -> Result<()> {
 
     // login and get a session key
     info!("login to bitwarden...");
-    let session = bitwarden::login().await.unwrap();
+    let session = bw::BitwardenClient::login().await?;
     info!("logged in to bitwarden");
 
     info!("starting bitwarden-secrets-operator...");
@@ -125,7 +126,7 @@ async fn main() -> Result<()> {
     let cache = Arc::new(Mutex::new(HashMap::<String, Value>::new()));
 
     let controller_handle = tokio::spawn(async move {
-        bitwarden::run(client, args, session, cache, shutdown_rx).await.unwrap();
+        controller::run(client, args, session, cache, shutdown_rx).await
     });
 
     info!("starting metrics http server...");
@@ -141,8 +142,18 @@ async fn main() -> Result<()> {
         result = axum::serve(listener, app) => {
             result?;
         }
-        _ = controller_handle => {
-            info!("controller task completed");
+        result = controller_handle => {
+            match result {
+                Ok(Ok(())) => info!("controller task completed"),
+                Ok(Err(e)) => {
+                    warn!("controller task failed: {:#}", e);
+                    process::exit(1);
+                }
+                Err(e) => {
+                    warn!("controller task panicked: {}", e);
+                    process::exit(1);
+                }
+            }
         }
         _ = async {
             loop {
