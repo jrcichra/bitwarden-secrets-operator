@@ -30,6 +30,9 @@ const MANAGED_BY: (&str, &str) = ("app.kubernetes.io/managed-by", "bitwarden-sec
 const DEFAULT_NOTE_KEY: &str = "notes";
 const MAX_BACKOFF: Duration = Duration::from_secs(300);
 const READY: &str = "Ready";
+/// Safety-net resync. Real changes arrive via the watches and via
+/// `reconcile_all_on` when a Secrets Manager refresh sees new content.
+const RESYNC: Duration = Duration::from_secs(3600);
 
 /// Materializes the Secrets Manager secret `spec.name` as a `Secret` with the
 /// same name and namespace as this object.
@@ -80,7 +83,6 @@ type Cache = Arc<Mutex<HashMap<String, Item>>>;
 struct Context {
     client: Client,
     cache: Cache,
-    requeue_after: Duration,
     failures: Mutex<HashMap<ObjectRef<BitwardenSecret>, u32>>,
 }
 
@@ -196,15 +198,24 @@ async fn apply_secret(obj: &BitwardenSecret, ctx: &Context) -> Result<(), Error>
         ..Default::default()
     };
 
-    Api::<Secret>::namespaced(ctx.client.clone(), &namespace)
-        .patch(
-            &name,
-            &PatchParams::apply(FIELD_MANAGER).force(),
-            &Patch::Apply(&secret),
-        )
-        .await
-        .map_err(Error::Apply)?;
-    Ok(())
+    let api = Api::<Secret>::namespaced(ctx.client.clone(), &namespace);
+    let params = PatchParams::apply(FIELD_MANAGER).force();
+    let patch = Patch::Apply(&secret);
+    let apply = || api.patch(&name, &params, &patch);
+    match apply().await {
+        Ok(_) => Ok(()),
+        // `type` is immutable, so a changed spec.type needs a fresh Secret
+        Err(kube::Error::Api(status))
+            if status.code == 422 && status.message.contains("immutable") =>
+        {
+            info!(secret = %name, namespace = %namespace, "recreating Secret: {}", status.message);
+            api.delete(&name, &Default::default())
+                .await
+                .map_err(Error::Apply)?;
+            apply().await.map(|_| ()).map_err(Error::Apply)
+        }
+        Err(e) => Err(Error::Apply(e)),
+    }
 }
 
 async fn write_ready(obj: &BitwardenSecret, client: &Client, outcome: Result<(), &Error>) {
@@ -249,8 +260,7 @@ async fn reconcile(obj: Arc<BitwardenSecret>, ctx: Arc<Context>) -> Result<Actio
     metrics::LAST_SUCCESSFUL_RECONCILE.set(chrono::Utc::now().timestamp());
     metrics::RECONCILE_SUCCESS_TOTAL.inc();
 
-    // requeue so Secrets Manager edits reach the Secret
-    Ok(Action::requeue(ctx.requeue_after))
+    Ok(Action::requeue(RESYNC))
 }
 
 fn error_policy(obj: Arc<BitwardenSecret>, error: &Error, ctx: Arc<Context>) -> Action {
@@ -269,20 +279,24 @@ fn error_policy(obj: Arc<BitwardenSecret>, error: &Error, ctx: Arc<Context>) -> 
     Action::requeue(backoff(failures))
 }
 
-async fn refresh(sm: &SecretsManager, cache: &Cache) {
-    match sm.fetch().await {
-        Ok(items) => {
-            info!("loaded {} secrets from Secrets Manager", items.len());
-            metrics::CACHED_SECRETS.set(items.len().try_into().unwrap_or(i64::MAX));
-            metrics::CACHE_REFRESH_SUCCESS_TOTAL.inc();
-            *cache.lock().expect("cache lock poisoned") = items;
-        }
-        Err(e) => {
-            // keep serving the previous cache
-            warn!("failed to refresh secrets: {e:#}");
-            metrics::CACHE_REFRESH_FAILURE_TOTAL.inc();
-        }
+/// Reload the cache. `Ok(true)` when the contents changed.
+async fn refresh(sm: &SecretsManager, cache: &Cache) -> anyhow::Result<bool> {
+    let items = sm.fetch().await.inspect_err(|e| {
+        warn!("failed to refresh secrets: {e:#}");
+        metrics::CACHE_REFRESH_FAILURE_TOTAL.inc();
+    })?;
+    metrics::CACHED_SECRETS.set(items.len().try_into().unwrap_or(i64::MAX));
+    metrics::CACHE_REFRESH_SUCCESS_TOTAL.inc();
+    let mut cache = cache.lock().expect("cache lock poisoned");
+    let changed = *cache != items;
+    if changed {
+        info!(
+            "loaded {} secrets from Secrets Manager (changed)",
+            items.len()
+        );
+        *cache = items;
     }
+    Ok(changed)
 }
 
 /// Run the controller until `shutdown` resolves.
@@ -293,16 +307,26 @@ pub async fn run(
     shutdown: impl Future<Output = ()> + Send + Sync + 'static,
 ) {
     let cache = Cache::default();
-    refresh(&sm, &cache).await;
+    // an empty cache would mark every object NotFound, so wait for a first load
+    let mut attempt = 0;
+    while refresh(&sm, &cache).await.is_err() {
+        attempt += 1;
+        tokio::time::sleep(backoff(attempt)).await;
+    }
 
+    // a refresh that changes anything reconciles every object right away
+    let (changed_tx, changed_rx) = futures::channel::mpsc::unbounded::<()>();
     let refresher = tokio::spawn({
         let cache = cache.clone();
         async move {
             let mut ticker = tokio::time::interval(interval);
-            ticker.tick().await; // first tick is immediate; we just refreshed
+            ticker.tick().await; // first tick is immediate; we just loaded
             loop {
                 ticker.tick().await;
-                refresh(&sm, &cache).await;
+                // errors are logged in refresh; keep serving the old cache
+                if let Ok(true) = refresh(&sm, &cache).await {
+                    let _ = changed_tx.unbounded_send(());
+                }
             }
         }
     });
@@ -310,7 +334,6 @@ pub async fn run(
     let ctx = Arc::new(Context {
         client: client.clone(),
         cache,
-        requeue_after: interval,
         failures: Mutex::default(),
     });
 
@@ -323,6 +346,7 @@ pub async fn run(
         watcher::Config::default(),
     )
     .owns(Api::<Secret>::all(client), owned)
+    .reconcile_all_on(changed_rx)
     .graceful_shutdown_on(shutdown)
     .run(reconcile, error_policy, ctx)
     .for_each(|res| async move {

@@ -25,7 +25,7 @@ const LEASE_RENEW_EVERY: Duration = Duration::from_secs(5);
 #[derive(Parser, Debug)]
 #[command(version, about)]
 struct Args {
-    /// Seconds between Secrets Manager refreshes and Secret re-applies.
+    /// Seconds between Secrets Manager polls; any change is applied right after.
     #[arg(long, env, default_value_t = 300)]
     reconcile_interval: u64,
     /// Print the CRD as YAML and exit.

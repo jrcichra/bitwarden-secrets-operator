@@ -80,8 +80,10 @@ spec:
 | anything else                                  | `notes`, or whatever `spec.key` says |
 
 More examples are in `examples/object.yaml`. Changes in Secrets Manager reach
-the `Secret` within `RECONCILE_INTERVAL` seconds; a `Secret` that's edited or
-deleted by hand is put back immediately.
+the `Secret` within `RECONCILE_INTERVAL` seconds (each poll that sees a change
+reconciles everything at once). A `Secret` that's edited or deleted by hand is
+put back immediately, and changing `spec.type` recreates the `Secret` (its type
+is immutable).
 
 Each `BitwardenSecret` reports a `Ready` condition:
 
@@ -100,7 +102,7 @@ $ kubectl wait bws/shed-ark-db --for=condition=Ready
 | `BWS_ACCESS_TOKEN`   | (required)                   | Machine account access token                         |
 | `NAMESPACE`          | (required)                   | Namespace of the leader-election lease (downward API) |
 | `LEASE_NAME`         | `bitwarden-secrets-operator` | Name of the leader-election `Lease`                  |
-| `RECONCILE_INTERVAL` | `300`                        | Seconds between refreshes and `Secret` re-applies    |
+| `RECONCILE_INTERVAL` | `300`                        | Seconds between Secrets Manager polls                |
 | `METRICS_PORT`       | `8000`                       | Prometheus `/metrics` port (served by the leader)    |
 
 Metrics: `last_reconcile`, `reconcile_success_total`,
