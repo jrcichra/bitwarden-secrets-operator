@@ -50,8 +50,8 @@ Also worth doing yourself:
 
 ## Install
 
-1. Create the bot account as described above, and generate its
-   [personal API key](https://bitwarden.com/help/personal-api-key/).
+1. Generate a [personal API key](https://bitwarden.com/help/personal-api-key/)
+   and put the items you want synced in a `kubernetes` folder.
 2. Run `./login.sh` (read it first). It prompts for the client ID, client
    secret and password, then creates the `bitwarden-credentials` Secret in the
    `bitwarden-secrets-operator` namespace.
