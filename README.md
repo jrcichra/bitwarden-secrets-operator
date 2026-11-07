@@ -20,7 +20,7 @@ Hardening in `examples/operator.yaml`:
 
 - **Narrow RBAC.** The operator needs `create`/`patch`/`list`/`watch` on
   Secrets (to apply them and to restore one that's edited or deleted) and
-  `patch` on `bitwardensecrets/status`. It only watches Secrets carrying its
+  `patch` on `bitwardensecrets/status`, plus `create`/`patch` on Events. It only watches Secrets carrying its
   `app.kubernetes.io/managed-by` label, but RBAC can't express that, so
   treat the service account as able to read Secrets cluster-wide. Owner
   references clean up a Secret when its `BitwardenSecret` is deleted.
@@ -95,6 +95,9 @@ searxng     api-key       api-key       False   NotFound   3d
 $ kubectl wait bws/shed-ark-db --for=condition=Ready
 ```
 
+Each change of that condition is also recorded as an Event, so
+`kubectl describe bws <name>` shows when it broke or recovered and why.
+
 ## Configuration
 
 | Env / flag           | Default                      | Meaning                                              |
@@ -107,7 +110,9 @@ $ kubectl wait bws/shed-ark-db --for=condition=Ready
 | `METRICS_PORT`       | `8000`                       | Prometheus `/metrics` port (served by the leader)    |
 
 Metrics: `last_reconcile` (Unix time of the last successful reconcile),
-`cached_secrets`, `reconcile_failure_total`, `cache_refresh_failure_total`.
+`cached_secrets`, `reconcile_failure_total{reason}` (the `Ready` reason),
+`cache_refresh_failure_total`. For per-object readiness, have
+kube-state-metrics export the `Ready` condition (`examples/kube-state-metrics.yaml`).
 
 ## Development
 

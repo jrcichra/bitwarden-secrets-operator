@@ -11,13 +11,15 @@ use clap::Parser;
 use controller::BitwardenSecret;
 use kube::{Client, CustomResourceExt};
 use kube_leader_election::{LeaseLock, LeaseLockParams, LeaseLockResult};
+use std::io::IsTerminal;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::oneshot;
-use tracing::{info, warn};
+use tracing::{Level, info, warn};
+use tracing_subscriber::{filter::Targets, fmt, prelude::*};
 
 const LEASE_TTL: Duration = Duration::from_secs(15);
 const LEASE_RENEW_EVERY: Duration = Duration::from_secs(5);
@@ -45,7 +47,16 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
+    // followers retry the lease every 5s and kube_leader_election logs each
+    // attempt at INFO; colors only when someone's watching a terminal
+    tracing_subscriber::registry()
+        .with(fmt::layer().with_ansi(std::io::stdout().is_terminal()))
+        .with(
+            Targets::new()
+                .with_default(Level::INFO)
+                .with_target("kube_leader_election", Level::WARN),
+        )
+        .init();
     let args = Args::parse();
 
     if args.generate_crd {
@@ -64,11 +75,12 @@ async fn main() -> Result<()> {
     let namespace = args.namespace.context("--namespace is required")?;
     let client = Client::try_default().await?;
 
+    let pod_name = std::env::var("POD_NAME").context("POD_NAME is not set")?;
     let lease = LeaseLock::new(
         client.clone(),
         &namespace,
         LeaseLockParams {
-            holder_id: std::env::var("POD_NAME").context("POD_NAME is not set")?,
+            holder_id: pod_name.clone(),
             lease_name: args.lease_name.clone(),
             lease_ttl: LEASE_TTL,
         },
@@ -114,6 +126,7 @@ async fn main() -> Result<()> {
         client,
         sm,
         Duration::from_secs(args.reconcile_interval),
+        pod_name,
         async move {
             let _ = stop_rx.await;
         },

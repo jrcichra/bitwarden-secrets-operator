@@ -1,0 +1,27 @@
+# kube-state-metrics custom resource config: exports
+# kube_bitwardensecret_ready{namespace,name,reason} = 1 (Ready) or 0.
+# Pass with --custom-resource-state-config-file (or inline via
+# --custom-resource-state-config); kube-state-metrics needs list/watch on
+# bitwardensecrets.jrcichra.dev and customresourcedefinitions.
+kind: CustomResourceStateMetrics
+spec:
+  resources:
+    - groupVersionKind:
+        group: jrcichra.dev
+        version: v1
+        kind: BitwardenSecret
+      metricNamePrefix: kube_bitwardensecret
+      labelsFromPath:
+        namespace: [metadata, namespace]
+        name: [metadata, name]
+      metrics:
+        - name: ready
+          help: "Ready condition of a BitwardenSecret (1 = True)"
+          each:
+            type: Gauge
+            gauge:
+              path: [status, conditions]
+              labelsFromPath:
+                type: [type]
+                reason: [reason]
+              valueFrom: [status]

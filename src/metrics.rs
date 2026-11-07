@@ -2,7 +2,10 @@
 //! exporting `last_reconcile = 0` would trip "hasn't reconciled in an hour"
 //! alerts, so `main` starts the server after winning the lease.
 
-use prometheus::{IntCounter, IntGauge, TextEncoder, register_int_counter, register_int_gauge};
+use prometheus::{
+    IntCounter, IntCounterVec, IntGauge, TextEncoder, register_int_counter,
+    register_int_counter_vec, register_int_gauge,
+};
 use std::sync::LazyLock;
 
 pub static LAST_SUCCESSFUL_RECONCILE: LazyLock<IntGauge> = LazyLock::new(|| {
@@ -13,10 +16,11 @@ pub static LAST_SUCCESSFUL_RECONCILE: LazyLock<IntGauge> = LazyLock::new(|| {
     .expect("register last_reconcile")
 });
 
-pub static RECONCILE_FAILURE_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
-    register_int_counter!(
+pub static RECONCILE_FAILURE_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    register_int_counter_vec!(
         "reconcile_failure_total",
-        "Total number of failed reconciles"
+        "Total number of failed reconciles, by Ready condition reason",
+        &["reason"]
     )
     .expect("register reconcile_failure_total")
 });
@@ -41,7 +45,9 @@ pub static CACHE_REFRESH_FAILURE_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| 
 /// until their first increment. `last_reconcile` stays lazy: a 0 before the
 /// first reconcile would read as "stale for 56 years".
 pub fn init() {
-    LazyLock::force(&RECONCILE_FAILURE_TOTAL);
+    for reason in ["NotFound", "InvalidObject", "ApplyFailed"] {
+        RECONCILE_FAILURE_TOTAL.with_label_values(&[reason]);
+    }
     LazyLock::force(&CACHED_SECRETS);
     LazyLock::force(&CACHE_REFRESH_FAILURE_TOTAL);
 }

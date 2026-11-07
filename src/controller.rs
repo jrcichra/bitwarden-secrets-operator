@@ -11,6 +11,7 @@ use kube::{
     api::{Api, Patch, PatchParams},
     runtime::{
         controller::{Action, Controller},
+        events::{Event, EventType, Recorder, Reporter},
         reflector::ObjectRef,
         watcher,
     },
@@ -70,6 +71,7 @@ type Cache = Arc<Mutex<HashMap<String, Item>>>;
 struct Context {
     client: Client,
     cache: Cache,
+    recorder: Recorder,
 }
 
 #[derive(Debug, Error)]
@@ -197,7 +199,9 @@ async fn apply_secret(obj: &BitwardenSecret, ctx: &Context) -> Result<(), Error>
     }
 }
 
-async fn write_ready(obj: &BitwardenSecret, client: &Client, outcome: Result<(), &Error>) {
+/// Record the `Ready` condition, and an Event when it changes, so
+/// `kubectl describe` shows the history.
+async fn write_ready(obj: &BitwardenSecret, ctx: &Context, outcome: Result<(), &Error>) {
     let current = obj
         .status
         .as_ref()
@@ -214,7 +218,21 @@ async fn write_ready(obj: &BitwardenSecret, client: &Client, outcome: Result<(),
         "kind": BitwardenSecret::kind(&()),
         "status": { "conditions": [ready] },
     });
-    if let Err(e) = Api::<BitwardenSecret>::namespaced(client.clone(), &namespace)
+    let event = Event {
+        type_: if ready.status == "True" {
+            EventType::Normal
+        } else {
+            EventType::Warning
+        },
+        reason: ready.reason.clone(),
+        note: (!ready.message.is_empty()).then(|| ready.message.clone()),
+        action: "Reconcile".into(),
+        secondary: None,
+    };
+    if let Err(e) = ctx.recorder.publish(&event, &obj.object_ref(&())).await {
+        warn!(object = %ObjectRef::from_obj(obj), "failed to publish event: {e}");
+    }
+    if let Err(e) = Api::<BitwardenSecret>::namespaced(ctx.client.clone(), &namespace)
         .patch_status(
             name,
             &PatchParams::apply(FIELD_MANAGER).force(),
@@ -229,7 +247,7 @@ async fn write_ready(obj: &BitwardenSecret, client: &Client, outcome: Result<(),
 
 async fn reconcile(obj: Arc<BitwardenSecret>, ctx: Arc<Context>) -> Result<Action, Error> {
     let result = apply_secret(&obj, &ctx).await;
-    write_ready(&obj, &ctx.client, result.as_ref().map(|_| ())).await;
+    write_ready(&obj, &ctx, result.as_ref().map(|_| ())).await;
     result?;
     metrics::LAST_SUCCESSFUL_RECONCILE.set(k8s_openapi::jiff::Timestamp::now().as_second());
 
@@ -238,7 +256,9 @@ async fn reconcile(obj: Arc<BitwardenSecret>, ctx: Arc<Context>) -> Result<Actio
 
 fn error_policy(obj: Arc<BitwardenSecret>, error: &Error, _: Arc<Context>) -> Action {
     warn!(object = %ObjectRef::from_obj(&*obj), "reconcile failed: {error}");
-    metrics::RECONCILE_FAILURE_TOTAL.inc();
+    metrics::RECONCILE_FAILURE_TOTAL
+        .with_label_values(&[error.reason()])
+        .inc();
     Action::requeue(RETRY)
 }
 
@@ -266,6 +286,7 @@ pub async fn run(
     client: Client,
     sm: SecretsManager,
     interval: Duration,
+    pod_name: String,
     shutdown: impl Future<Output = ()> + Send + Sync + 'static,
 ) {
     let cache = Cache::default();
@@ -291,7 +312,12 @@ pub async fn run(
         }
     });
 
+    let reporter = Reporter {
+        controller: "bitwarden-secrets-operator".into(),
+        instance: Some(pod_name),
+    };
     let ctx = Arc::new(Context {
+        recorder: Recorder::new(client.clone(), reporter),
         client: client.clone(),
         cache,
     });
