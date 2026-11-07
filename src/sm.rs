@@ -1,12 +1,12 @@
 //! Bitwarden Secrets Manager access via the official Rust SDK.
 
 use anyhow::{Context, Result};
+use bitwarden::OrganizationId;
 use bitwarden::secrets_manager::{
     AccessTokenLoginRequest, ClientSettings, SecretsManagerClient, secrets::SecretsSyncRequest,
 };
 use std::collections::HashMap;
 use tracing::warn;
-use uuid::Uuid;
 
 /// A secret's value, as the controller turns it into `Secret` data.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,7 +38,7 @@ impl Item {
 /// short-lived bearer token from the access token on its own.
 pub struct SecretsManager {
     client: SecretsManagerClient,
-    organization_id: Uuid,
+    organization_id: OrganizationId,
 }
 
 impl SecretsManager {
@@ -57,8 +57,7 @@ impl SecretsManager {
             .context("access token login failed")?;
         let organization_id = client
             .get_access_token_organization()
-            .context("access token is not tied to an organization")?
-            .into();
+            .context("access token is not tied to an organization")?;
         Ok(Self {
             client,
             organization_id,
@@ -72,7 +71,7 @@ impl SecretsManager {
             .client
             .secrets()
             .sync(&SecretsSyncRequest {
-                organization_id: self.organization_id,
+                organization_id: self.organization_id.into(),
                 last_synced_date: None,
             })
             .await
@@ -80,11 +79,12 @@ impl SecretsManager {
 
         let mut items = HashMap::new();
         for secret in res.secrets.unwrap_or_default() {
-            let name = secret.key;
-            if items.contains_key(&name) {
-                warn!(secret = %name, "duplicate secret name, keeping the last one");
+            if items
+                .insert(secret.key.clone(), Item::from_value(secret.value))
+                .is_some()
+            {
+                warn!(secret = %secret.key, "duplicate secret name, keeping the last one");
             }
-            items.insert(name, Item::from_value(secret.value));
         }
         Ok(items)
     }

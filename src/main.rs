@@ -28,8 +28,8 @@ struct Args {
     /// Seconds between Secrets Manager polls; any change is applied right after.
     #[arg(long, env, default_value_t = 300)]
     reconcile_interval: u64,
-    /// Print the CRD as YAML and exit.
-    #[arg(long, env)]
+    /// Print the CRD (JSON, which is valid YAML) and exit.
+    #[arg(long)]
     generate_crd: bool,
     /// Port for Prometheus `/metrics`.
     #[arg(long, env, default_value_t = 8000)]
@@ -49,7 +49,7 @@ async fn main() -> Result<()> {
     let args = Args::parse();
 
     if args.generate_crd {
-        print!("{}", serde_yaml::to_string(&BitwardenSecret::crd())?);
+        println!("{}", serde_json::to_string_pretty(&BitwardenSecret::crd())?);
         return Ok(());
     }
 
@@ -68,7 +68,7 @@ async fn main() -> Result<()> {
         client.clone(),
         &namespace,
         LeaseLockParams {
-            holder_id: gethostname::gethostname().to_string_lossy().into_owned(),
+            holder_id: std::env::var("POD_NAME").context("POD_NAME is not set")?,
             lease_name: args.lease_name.clone(),
             lease_ttl: LEASE_TTL,
         },

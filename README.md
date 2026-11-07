@@ -101,13 +101,13 @@ $ kubectl wait bws/shed-ark-db --for=condition=Ready
 | -------------------- | ---------------------------- | ---------------------------------------------------- |
 | `BWS_ACCESS_TOKEN`   | (required)                   | Machine account access token                         |
 | `NAMESPACE`          | (required)                   | Namespace of the leader-election lease (downward API) |
+| `POD_NAME`           | (required)                   | Lease holder identity (downward API)                 |
 | `LEASE_NAME`         | `bitwarden-secrets-operator` | Name of the leader-election `Lease`                  |
 | `RECONCILE_INTERVAL` | `300`                        | Seconds between Secrets Manager polls                |
 | `METRICS_PORT`       | `8000`                       | Prometheus `/metrics` port (served by the leader)    |
 
-Metrics: `last_reconcile`, `reconcile_success_total`,
-`reconcile_failure_total`, `cached_secrets`, `cache_refresh_success_total`,
-`cache_refresh_failure_total`.
+Metrics: `last_reconcile` (Unix time of the last successful reconcile),
+`cached_secrets`, `reconcile_failure_total`, `cache_refresh_failure_total`.
 
 ## Development
 

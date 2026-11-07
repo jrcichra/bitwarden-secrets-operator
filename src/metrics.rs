@@ -13,14 +13,6 @@ pub static LAST_SUCCESSFUL_RECONCILE: LazyLock<IntGauge> = LazyLock::new(|| {
     .expect("register last_reconcile")
 });
 
-pub static RECONCILE_SUCCESS_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
-    register_int_counter!(
-        "reconcile_success_total",
-        "Total number of successful reconciles"
-    )
-    .expect("register reconcile_success_total")
-});
-
 pub static RECONCILE_FAILURE_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
     register_int_counter!(
         "reconcile_failure_total",
@@ -35,14 +27,6 @@ pub static CACHED_SECRETS: LazyLock<IntGauge> = LazyLock::new(|| {
         "Number of secrets currently held in the in-memory cache"
     )
     .expect("register cached_secrets")
-});
-
-pub static CACHE_REFRESH_SUCCESS_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
-    register_int_counter!(
-        "cache_refresh_success_total",
-        "Total number of successful Secrets Manager cache refreshes"
-    )
-    .expect("register cache_refresh_success_total")
 });
 
 pub static CACHE_REFRESH_FAILURE_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {

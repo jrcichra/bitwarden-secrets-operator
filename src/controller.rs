@@ -5,7 +5,7 @@ use crate::sm::{Item, SecretsManager};
 use futures::StreamExt;
 use k8s_openapi::ByteString;
 use k8s_openapi::api::core::v1::Secret;
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, ObjectMeta, Time};
 use kube::{
     Client, CustomResource, Resource, ResourceExt,
     api::{Api, Patch, PatchParams},
@@ -28,8 +28,9 @@ use tracing::{info, warn};
 const FIELD_MANAGER: &str = "bitwarden-secrets-operator.jrcichra.dev";
 const MANAGED_BY: (&str, &str) = ("app.kubernetes.io/managed-by", "bitwarden-secrets-operator");
 const DEFAULT_NOTE_KEY: &str = "notes";
-const MAX_BACKOFF: Duration = Duration::from_secs(300);
 const READY: &str = "Ready";
+/// Retry delay after a failed reconcile or startup fetch.
+const RETRY: Duration = Duration::from_secs(60);
 /// Safety-net resync. Real changes arrive via the watches and via
 /// `reconcile_all_on` when a Secrets Manager refresh sees new content.
 const RESYNC: Duration = Duration::from_secs(3600);
@@ -62,28 +63,11 @@ pub struct BitwardenSecretStatus {
     pub conditions: Vec<Condition>,
 }
 
-/// Same shape as `metav1.Condition`, so `kubectl wait --for=condition=Ready`
-/// works.
-#[derive(Debug, Serialize, Deserialize, Default, Clone, PartialEq, Eq, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct Condition {
-    #[serde(rename = "type")]
-    pub type_: String,
-    /// `True` or `False`.
-    pub status: String,
-    pub reason: String,
-    pub message: String,
-    pub last_transition_time: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub observed_generation: Option<i64>,
-}
-
 type Cache = Arc<Mutex<HashMap<String, Item>>>;
 
 struct Context {
     client: Client,
     cache: Cache,
-    failures: Mutex<HashMap<ObjectRef<BitwardenSecret>, u32>>,
 }
 
 #[derive(Debug, Error)]
@@ -107,13 +91,6 @@ impl Error {
     }
 }
 
-/// 10s, 20s, 40s, ... capped at `MAX_BACKOFF`.
-fn backoff(failures: u32) -> Duration {
-    Duration::from_secs(5)
-        .saturating_mul(2u32.saturating_pow(failures))
-        .min(MAX_BACKOFF)
-}
-
 /// `Secret` data for an item.
 fn secret_data(item: &Item, key: Option<&str>) -> BTreeMap<String, ByteString> {
     let entry = |k: &str, v: &str| (k.to_string(), ByteString(v.as_bytes().to_vec()));
@@ -132,7 +109,7 @@ fn next_ready(
     current: Option<&Condition>,
     generation: Option<i64>,
     outcome: Result<(), &Error>,
-    now: &str,
+    now: Time,
 ) -> Option<Condition> {
     let (status, reason, message) = match outcome {
         Ok(()) => ("True", "Synced", String::new()),
@@ -149,7 +126,7 @@ fn next_ready(
     }
     let last_transition_time = match current {
         Some(c) if c.status == status => c.last_transition_time.clone(),
-        _ => now.to_string(),
+        _ => now,
     };
     Some(Condition {
         type_: READY.into(),
@@ -223,8 +200,8 @@ async fn write_ready(obj: &BitwardenSecret, client: &Client, outcome: Result<(),
         .status
         .as_ref()
         .and_then(|s| s.conditions.iter().find(|c| c.type_ == READY));
-    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    let Some(ready) = next_ready(current, obj.metadata.generation, outcome, &now) else {
+    let now = Time(k8s_openapi::jiff::Timestamp::now());
+    let Some(ready) = next_ready(current, obj.metadata.generation, outcome, now) else {
         return;
     };
     let (Some(name), Some(namespace)) = (obj.metadata.name.as_deref(), obj.namespace()) else {
@@ -252,31 +229,15 @@ async fn reconcile(obj: Arc<BitwardenSecret>, ctx: Arc<Context>) -> Result<Actio
     let result = apply_secret(&obj, &ctx).await;
     write_ready(&obj, &ctx.client, result.as_ref().map(|_| ())).await;
     result?;
-
-    ctx.failures
-        .lock()
-        .expect("failures lock poisoned")
-        .remove(&ObjectRef::from_obj(&*obj));
-    metrics::LAST_SUCCESSFUL_RECONCILE.set(chrono::Utc::now().timestamp());
-    metrics::RECONCILE_SUCCESS_TOTAL.inc();
+    metrics::LAST_SUCCESSFUL_RECONCILE.set(k8s_openapi::jiff::Timestamp::now().as_second());
 
     Ok(Action::requeue(RESYNC))
 }
 
-fn error_policy(obj: Arc<BitwardenSecret>, error: &Error, ctx: Arc<Context>) -> Action {
-    let failures = {
-        let mut map = ctx.failures.lock().expect("failures lock poisoned");
-        let n = map.entry(ObjectRef::from_obj(&*obj)).or_default();
-        *n += 1;
-        *n
-    };
-    warn!(
-        object = %ObjectRef::from_obj(&*obj),
-        failures,
-        "reconcile failed: {error}"
-    );
+fn error_policy(obj: Arc<BitwardenSecret>, error: &Error, _: Arc<Context>) -> Action {
+    warn!(object = %ObjectRef::from_obj(&*obj), "reconcile failed: {error}");
     metrics::RECONCILE_FAILURE_TOTAL.inc();
-    Action::requeue(backoff(failures))
+    Action::requeue(RETRY)
 }
 
 /// Reload the cache. `Ok(true)` when the contents changed.
@@ -286,7 +247,6 @@ async fn refresh(sm: &SecretsManager, cache: &Cache) -> anyhow::Result<bool> {
         metrics::CACHE_REFRESH_FAILURE_TOTAL.inc();
     })?;
     metrics::CACHED_SECRETS.set(items.len().try_into().unwrap_or(i64::MAX));
-    metrics::CACHE_REFRESH_SUCCESS_TOTAL.inc();
     let mut cache = cache.lock().expect("cache lock poisoned");
     let changed = *cache != items;
     if changed {
@@ -308,10 +268,8 @@ pub async fn run(
 ) {
     let cache = Cache::default();
     // an empty cache would mark every object NotFound, so wait for a first load
-    let mut attempt = 0;
     while refresh(&sm, &cache).await.is_err() {
-        attempt += 1;
-        tokio::time::sleep(backoff(attempt)).await;
+        tokio::time::sleep(RETRY).await;
     }
 
     // a refresh that changes anything reconciles every object right away
@@ -334,7 +292,6 @@ pub async fn run(
     let ctx = Arc::new(Context {
         client: client.clone(),
         cache,
-        failures: Mutex::default(),
     });
 
     // watch only Secrets we made, so an edited or deleted one is put back at
@@ -366,14 +323,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn backoff_doubles_and_caps() {
-        assert_eq!(backoff(1), Duration::from_secs(10));
-        assert_eq!(backoff(2), Duration::from_secs(20));
-        assert_eq!(backoff(10), MAX_BACKOFF);
-        assert_eq!(backoff(u32::MAX), MAX_BACKOFF);
-    }
-
-    #[test]
     fn login_ignores_key_and_note_uses_it() {
         let login = Item::Login {
             username: "u".into(),
@@ -391,34 +340,35 @@ mod tests {
         );
     }
 
+    fn t(secs: i64) -> Time {
+        Time(k8s_openapi::jiff::Timestamp::from_second(secs).unwrap())
+    }
+
     #[test]
     fn ready_condition_only_changes_on_change() {
         let err = Error::NotFound("x".into());
 
-        let first = next_ready(None, Some(1), Ok(()), "t1").expect("first write");
+        let first = next_ready(None, Some(1), Ok(()), t(1)).expect("first write");
         assert_eq!(
             (first.status.as_str(), first.reason.as_str()),
             ("True", "Synced")
         );
-        assert_eq!(first.last_transition_time, "t1");
+        assert_eq!(first.last_transition_time, t(1));
 
         // same outcome again: no write (this is what prevents a hot loop)
-        assert_eq!(next_ready(Some(&first), Some(1), Ok(()), "t2"), None);
+        assert_eq!(next_ready(Some(&first), Some(1), Ok(()), t(2)), None);
 
         // new generation, still ready: write, but keep the transition time
-        let regen = next_ready(Some(&first), Some(2), Ok(()), "t3").expect("generation bump");
-        assert_eq!(regen.last_transition_time, "t1");
+        let regen = next_ready(Some(&first), Some(2), Ok(()), t(3)).expect("generation bump");
+        assert_eq!(regen.last_transition_time, t(1));
 
         // ready -> not ready: write with a new transition time
-        let failed = next_ready(Some(&regen), Some(2), Err(&err), "t4").expect("transition");
+        let failed = next_ready(Some(&regen), Some(2), Err(&err), t(4)).expect("transition");
         assert_eq!(
-            (
-                failed.status.as_str(),
-                failed.reason.as_str(),
-                failed.last_transition_time.as_str()
-            ),
-            ("False", "NotFound", "t4")
+            (failed.status.as_str(), failed.reason.as_str()),
+            ("False", "NotFound")
         );
-        assert_eq!(next_ready(Some(&failed), Some(2), Err(&err), "t5"), None);
+        assert_eq!(failed.last_transition_time, t(4));
+        assert_eq!(next_ready(Some(&failed), Some(2), Err(&err), t(5)), None);
     }
 }

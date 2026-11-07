@@ -113,6 +113,10 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
             - name: BWS_ACCESS_TOKEN
               valueFrom:
                 secretKeyRef:
