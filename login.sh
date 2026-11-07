@@ -6,8 +6,13 @@ set -euo pipefail
 
 NAMESPACE="bitwarden-secrets-operator"
 
-read -rsp "Machine account access token: " BWS_ACCESS_TOKEN
+# `|| true`: read exits non-zero at EOF without a trailing newline (piped input)
+IFS= read -rsp "Machine account access token: " BWS_ACCESS_TOKEN || true
 echo
+if [[ -z "$BWS_ACCESS_TOKEN" ]]; then
+    echo "no token given" >&2
+    exit 1
+fi
 
 kubectl "$@" create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl "$@" apply -f -
 # apply (not create) so re-running rotates the token in place
