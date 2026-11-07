@@ -39,10 +39,18 @@ Also worth doing yourself:
    free plan covers 3 projects and 3 machine accounts). Create a project for
    the cluster, then a machine account with **Can read** on that project, and
    generate an access token.
-2. Run `./login.sh` (pass kubectl flags such as `--context home` if needed).
-   It prompts for the token and stores it as `BWS_ACCESS_TOKEN` in the
-   `bitwarden-credentials` Secret in the `bitwarden-secrets-operator`
-   namespace.
+2. Store the token (hidden prompt; it goes in via stdin, so not into shell
+   history or `ps`). Re-running it rotates the token in place:
+
+   ```sh
+   kubectl create namespace bitwarden-secrets-operator
+   read -rsp 'token: ' t && printf %s "$t" | kubectl create secret generic bitwarden-credentials \
+     -n bitwarden-secrets-operator --from-file=BWS_ACCESS_TOKEN=/dev/stdin \
+     --dry-run=client -o yaml | kubectl apply -f -; unset t
+   ```
+
+   After rotating, `kubectl -n bitwarden-secrets-operator rollout restart
+   deployment bitwarden-secrets-operator`.
 3. Apply the CRD and the operator:
 
    ```sh
