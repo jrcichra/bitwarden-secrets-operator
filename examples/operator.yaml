@@ -83,71 +83,34 @@ spec:
       serviceAccountName: bitwarden-secrets-operator
       securityContext:
         runAsNonRoot: true
-        runAsUser: 1000 # the image's `node` user
-        runAsGroup: 1000
-        fsGroup: 1000
+        runAsUser: 65532 # distroless `nonroot`
+        runAsGroup: 65532
         seccompProfile:
           type: RuntimeDefault
-      volumes:
-        # bw's data.json (encrypted vault cache). RAM-backed so it never
-        # lands on node disk.
-        - name: tmp
-          emptyDir:
-            medium: Memory
-            sizeLimit: 64Mi
       containers:
         - name: bitwarden-secrets-operator
           image: ghcr.io/jrcichra/bitwarden-secrets-operator:latest # pin a sha-<commit> tag
-          # Seed a fixed device ID before the first login, so pod restarts
-          # don't show up as "new device" logins (see README).
-          command:
-            - sh
-            - -c
-            - >-
-              mkdir -p "$BITWARDENCLI_APPDATA_DIR" &&
-              f="$BITWARDENCLI_APPDATA_DIR/data.json" && [ -s "$f" ] ||
-              printf '{"global_applicationId_appId":"%s"}' "$BW_DEVICE_ID" > "$f";
-              exec /app/bitwarden-secrets-operator
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
-          volumeMounts:
-            - name: tmp
-              mountPath: /tmp
           ports:
             - containerPort: 8000
           resources:
             requests:
               cpu: 10m
-              memory: 64Mi
+              memory: 32Mi
             limits:
               cpu: 500m
-              memory: 256Mi
+              memory: 128Mi
           env:
-            - name: HOME
-              value: /tmp
-            - name: BITWARDENCLI_APPDATA_DIR
-              value: /tmp/bw
-            - name: BW_DEVICE_ID
-              value: 00000000-0000-4000-8000-000000000000 # replace with `uuidgen` output
             - name: NAMESPACE
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
-            - name: BW_CLIENTID
+            - name: BWS_ACCESS_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: bitwarden-credentials
-                  key: BW_CLIENTID
-            - name: BW_CLIENTSECRET
-              valueFrom:
-                secretKeyRef:
-                  name: bitwarden-credentials
-                  key: BW_CLIENTSECRET
-            - name: BW_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: bitwarden-credentials
-                  key: BW_PASSWORD
+                  key: BWS_ACCESS_TOKEN

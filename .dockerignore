@@ -1,5 +1,3 @@
-deploy/
-.vscode/
-README.md
-Dockerfile
-.gitignore
+# the image only needs the prebuilt binaries
+*
+!docker-bin/

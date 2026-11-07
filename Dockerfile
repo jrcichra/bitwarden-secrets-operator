@@ -1,12 +1,7 @@
-FROM busybox:1.37.0 AS rename
-WORKDIR /app
-COPY docker-bin/bitwarden-secrets-operator-arm64 bitwarden-secrets-operator-arm64
-COPY docker-bin/bitwarden-secrets-operator-amd64 bitwarden-secrets-operator-amd64
-
-# lts node
-FROM node:24.14.0-bookworm-slim
-WORKDIR /app
+# CI builds the binaries natively per arch (see .github/workflows); this only
+# copies them in, so no QEMU is needed. distroless/cc has glibc + CA certs
+# (rustls verifies against the system store) and runs as uid 65532.
+FROM gcr.io/distroless/cc-debian13:nonroot
 ARG TARGETARCH
-RUN npm install -g @bitwarden/cli@2026.4.2
-COPY --from=rename /app/bitwarden-secrets-operator-$TARGETARCH /app/bitwarden-secrets-operator
-ENTRYPOINT [ "/app/bitwarden-secrets-operator" ]
+COPY docker-bin/bitwarden-secrets-operator-${TARGETARCH} /app/bitwarden-secrets-operator
+ENTRYPOINT ["/app/bitwarden-secrets-operator"]

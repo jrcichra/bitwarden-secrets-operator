@@ -1,325 +1,246 @@
-use super::prometheus;
-use crate::bw::BitwardenClient;
-use crate::Args;
-use chrono;
+//! The `BitwardenSecret` CRD and its reconciler.
+
+use crate::metrics;
+use crate::sm::{Item, SecretsManager};
 use futures::StreamExt;
 use k8s_openapi::api::core::v1::Secret;
-use kube::runtime::watcher;
-use kube::Resource;
 use kube::{
+    Client, CustomResource, Resource, ResourceExt,
     api::{Api, Patch, PatchParams},
-    runtime::controller::{Action, Controller},
-    Client, CustomResource,
+    runtime::{
+        controller::{Action, Controller},
+        reflector::ObjectRef,
+        watcher,
+    },
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::json;
 use std::collections::{BTreeMap, HashMap};
+use std::future::Future;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 use thiserror::Error;
 use tracing::{info, warn};
 
+const FIELD_MANAGER: &str = "bitwarden-secrets-operator.jrcichra.dev";
+const DEFAULT_NOTE_KEY: &str = "notes";
+const MAX_BACKOFF: Duration = Duration::from_secs(300);
+
+/// Materializes the Secrets Manager secret `spec.name` as a `Secret` with the
+/// same name and namespace as this object.
 #[derive(CustomResource, Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
 #[kube(group = "jrcichra.dev", version = "v1", kind = "BitwardenSecret")]
 #[kube(shortname = "bws", namespaced)]
 pub struct BitwardenSecretSpec {
+    /// Secrets Manager secret name.
     name: String,
+    /// `Secret` data key for a non-login value. Defaults to `notes`.
     key: Option<String>,
+    /// `Secret` type, e.g. `kubernetes.io/dockerconfigjson`.
     #[serde(rename = "type")]
     type_: Option<String>,
 }
 
-/// Identifies a Kubernetes object for the purposes of tracking per-object retry state.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct ObjectKey {
-    namespace: String,
-    name: String,
-}
+type Cache = Arc<Mutex<HashMap<String, Item>>>;
 
-impl ObjectKey {
-    fn from_object(obj: &BitwardenSecret) -> Self {
-        Self {
-            namespace: obj
-                .metadata
-                .namespace
-                .clone()
-                .unwrap_or_else(|| "unknown".to_string()),
-            name: obj
-                .metadata
-                .name
-                .clone()
-                .unwrap_or_else(|| "unknown".to_string()),
-        }
-    }
-}
-
-// Data we want access to in error/reconcile calls
-struct Data {
+struct Context {
     client: Client,
-    cache: Arc<Mutex<HashMap<String, Value>>>,
-    reconcile_interval: Duration,
-    retry_counts: Arc<Mutex<HashMap<ObjectKey, u32>>>,
+    cache: Cache,
+    requeue_after: Duration,
+    failures: Mutex<HashMap<ObjectRef<BitwardenSecret>, u32>>,
 }
 
 #[derive(Debug, Error)]
-enum ReconcileError {
-    #[error("Failed to create Secret: {0}")]
-    SecretCreationFailed(#[source] kube::Error),
-    #[error("MissingObjectKey: {0}")]
-    MissingObjectKey(&'static str),
-    #[error("BitwardenError: {0}")]
-    BitwardenError(String),
-    #[error("InvalidSecretData: {0}")]
-    InvalidSecretData(String),
+enum Error {
+    #[error("secret '{0}' not found in Secrets Manager")]
+    NotFound(String),
+    #[error("object has no {0}")]
+    MissingField(&'static str),
+    #[error("failed to apply Secret: {0}")]
+    Apply(#[source] kube::Error),
 }
 
-/// Calculate exponential backoff duration
-fn calculate_backoff(attempt: u32) -> Duration {
-    let base_secs = 5u64;
-    let max_secs = 300u64; // 5 minutes max
-    let backoff = base_secs.saturating_mul(2u64.saturating_pow(attempt));
-    Duration::from_secs(backoff.min(max_secs))
+/// 10s, 20s, 40s, ... capped at `MAX_BACKOFF`.
+fn backoff(failures: u32) -> Duration {
+    Duration::from_secs(5)
+        .saturating_mul(2u32.saturating_pow(failures))
+        .min(MAX_BACKOFF)
 }
 
-/// Controller triggers this whenever our main object or our children changed
-async fn reconcile(
-    generator: Arc<BitwardenSecret>,
-    ctx: Arc<Data>,
-) -> Result<Action, ReconcileError> {
-    let client = &ctx.client;
-    let name = &generator.spec.name;
-    let key = &generator.spec.key;
-    let type_ = &generator.spec.type_;
-    let mut contents = BTreeMap::new();
-
-    // Get the secret from the cache
-    let secret_value = {
-        let cache_guard = ctx.cache.lock().unwrap();
-        match cache_guard.get(name) {
-            Some(value) => value.clone(),
-            None => {
-                return Err(ReconcileError::BitwardenError(format!(
-                    "secret '{}' not found in cache",
-                    name
-                )));
-            }
-        }
-    };
-
-    // build the content for the secret here
-    match secret_value.get("login") {
-        Some(login) => {
-            // set the username and password keys
-            let username = login
-                .get("username")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| {
-                    ReconcileError::InvalidSecretData(format!(
-                        "login item '{}' is missing a string username",
-                        name
-                    ))
-                })?;
-            let password = login
-                .get("password")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| {
-                    ReconcileError::InvalidSecretData(format!(
-                        "login item '{}' is missing a string password",
-                        name
-                    ))
-                })?;
-            contents.insert("username".to_string(), username.to_string());
-            contents.insert("password".to_string(), password.to_string());
-        }
-        None => {
-            let notes_constant = "notes";
-            let mut use_key = notes_constant;
-            if let Some(key) = key {
-                use_key = key.as_str();
-            }
-            match secret_value.get(notes_constant) {
-                Some(notes) => {
-                    let notes_str = notes.as_str().ok_or_else(|| {
-                        ReconcileError::InvalidSecretData(format!(
-                            "item '{}' has a non-string notes field",
-                            name
-                        ))
-                    })?;
-                    contents.insert(use_key.to_string(), notes_str.to_string());
-                }
-                None => {
-                    return Err(ReconcileError::BitwardenError(format!(
-                        "card/login not found for {}",
-                        name
-                    )));
-                }
-            }
+/// `Secret` data for an item.
+fn secret_data(item: &Item, key: Option<&str>) -> BTreeMap<String, String> {
+    match item {
+        Item::Login { username, password } => BTreeMap::from([
+            ("username".to_string(), username.clone()),
+            ("password".to_string(), password.clone()),
+        ]),
+        Item::Note(value) => {
+            BTreeMap::from([(key.unwrap_or(DEFAULT_NOTE_KEY).to_string(), value.clone())])
         }
     }
-
-    let oref = generator.controller_owner_ref(&()).unwrap();
-    let current_time = chrono::offset::Utc::now();
-    let mut annotations = BTreeMap::new();
-    annotations.insert("lastReconciled".to_string(), current_time.to_rfc3339());
-
-    let secret_name = generator
-        .metadata
-        .name
-        .as_ref()
-        .ok_or(ReconcileError::MissingObjectKey(".metadata.name"))?
-        .clone();
-    let namespace = generator
-        .metadata
-        .namespace
-        .as_ref()
-        .ok_or(ReconcileError::MissingObjectKey(".metadata.namespace"))?
-        .clone();
-
-    let secret_api = Api::<Secret>::namespaced(client.clone(), &namespace);
-
-    let patch = serde_json::json!({
-        "apiVersion": "v1",
-        "kind": "Secret",
-        "metadata": {
-            "name": secret_name,
-            "namespace": namespace,
-            "ownerReferences": [oref],
-            "annotations": annotations,
-        },
-        "type": type_,
-        "stringData": contents,
-    });
-
-    secret_api
-        .patch(
-            &secret_name,
-            &PatchParams::apply("bitwarden-secrets-operator.jrcichra.dev").force(),
-            &Patch::Apply(&patch),
-        )
-        .await
-        .map_err(ReconcileError::SecretCreationFailed)?;
-
-    // this object succeeded, so reset any accumulated backoff for it
-    {
-        let mut retry_guard = ctx.retry_counts.lock().unwrap();
-        retry_guard.remove(&ObjectKey::from_object(&generator));
-    }
-
-    // let prometheus know we started the reconcile loop
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-    prometheus::LAST_SUCCESSFUL_RECONCILE.set(now.as_secs().try_into().unwrap());
-    prometheus::RECONCILE_SUCCESS_TOTAL.inc();
-
-    // Requeue periodically to refresh secret from cache
-    Ok(Action::requeue(ctx.reconcile_interval))
 }
 
-/// The controller triggers this on reconcile errors
-fn error_policy(object: Arc<BitwardenSecret>, error: &ReconcileError, ctx: Arc<Data>) -> Action {
-    let name = object
+async fn reconcile(obj: Arc<BitwardenSecret>, ctx: Arc<Context>) -> Result<Action, Error> {
+    let item = ctx
+        .cache
+        .lock()
+        .expect("cache lock poisoned")
+        .get(&obj.spec.name)
+        .cloned()
+        .ok_or_else(|| Error::NotFound(obj.spec.name.clone()))?;
+
+    let name = obj
         .metadata
         .name
         .clone()
-        .unwrap_or_else(|| "unknown".to_string());
-    let key = ObjectKey::from_object(&object);
+        .ok_or(Error::MissingField("name"))?;
+    let namespace = obj.namespace().ok_or(Error::MissingField("namespace"))?;
+    let owner = obj
+        .controller_owner_ref(&())
+        .ok_or(Error::MissingField("uid"))?;
 
-    let attempt = {
-        let mut retry_guard = ctx.retry_counts.lock().unwrap();
-        let entry = retry_guard.entry(key).or_insert(0);
-        *entry += 1;
-        *entry
-    };
+    let secret = json!({
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {
+            "name": name,
+            "namespace": namespace,
+            "ownerReferences": [owner],
+            "annotations": { "lastReconciled": chrono::Utc::now().to_rfc3339() },
+        },
+        "type": obj.spec.type_,
+        "stringData": secret_data(&item, obj.spec.key.as_deref()),
+    });
 
-    warn!(
-        "reconcile failed for {} (attempt {}): {:?}",
-        name, attempt, error
-    );
+    Api::<Secret>::namespaced(ctx.client.clone(), &namespace)
+        .patch(
+            &name,
+            &PatchParams::apply(FIELD_MANAGER).force(),
+            &Patch::Apply(&secret),
+        )
+        .await
+        .map_err(Error::Apply)?;
 
-    prometheus::RECONCILE_FAILURE_TOTAL.inc();
+    ctx.failures
+        .lock()
+        .expect("failures lock poisoned")
+        .remove(&ObjectRef::from_obj(&*obj));
+    metrics::LAST_SUCCESSFUL_RECONCILE.set(chrono::Utc::now().timestamp());
+    metrics::RECONCILE_SUCCESS_TOTAL.inc();
 
-    // Use exponential backoff, escalating per-object, with max of 5 minutes
-    Action::requeue(calculate_backoff(attempt))
+    // requeue so Secrets Manager edits reach the Secret
+    Ok(Action::requeue(ctx.requeue_after))
 }
 
-pub async fn run(
-    client: Client,
-    args: Args,
-    session: String,
-    cache: Arc<Mutex<HashMap<String, Value>>>,
-    shutdown_rx: tokio::sync::oneshot::Receiver<()>,
-) -> anyhow::Result<()> {
-    let bitwarden_secrets = Api::<BitwardenSecret>::all(client.clone());
-    let bw = Arc::new(BitwardenClient::new(session));
+fn error_policy(obj: Arc<BitwardenSecret>, error: &Error, ctx: Arc<Context>) -> Action {
+    let failures = {
+        let mut map = ctx.failures.lock().expect("failures lock poisoned");
+        let n = map.entry(ObjectRef::from_obj(&*obj)).or_default();
+        *n += 1;
+        *n
+    };
+    warn!(
+        object = %ObjectRef::from_obj(&*obj),
+        failures,
+        "reconcile failed: {error}"
+    );
+    metrics::RECONCILE_FAILURE_TOTAL.inc();
+    Action::requeue(backoff(failures))
+}
 
-    // Initial cache load
-    info!("loading secrets into cache...");
-    match bw.get_secrets(&args.folder).await {
-        Ok(new_secrets) => {
-            let mut cache_guard = cache.lock().unwrap();
-            info!("loaded {} secrets into cache", new_secrets.len());
-            prometheus::CACHED_SECRETS.set(new_secrets.len() as i64);
-            prometheus::CACHE_REFRESH_SUCCESS_TOTAL.inc();
-            *cache_guard = new_secrets;
+async fn refresh(sm: &SecretsManager, cache: &Cache) {
+    match sm.fetch().await {
+        Ok(items) => {
+            info!("loaded {} secrets from Secrets Manager", items.len());
+            metrics::CACHED_SECRETS.set(items.len().try_into().unwrap_or(i64::MAX));
+            metrics::CACHE_REFRESH_SUCCESS_TOTAL.inc();
+            *cache.lock().expect("cache lock poisoned") = items;
         }
         Err(e) => {
-            warn!("failed to load initial secrets: {}", e);
-            prometheus::CACHE_REFRESH_FAILURE_TOTAL.inc();
+            // keep serving the previous cache
+            warn!("failed to refresh secrets: {e:#}");
+            metrics::CACHE_REFRESH_FAILURE_TOTAL.inc();
         }
     }
+}
 
-    // Spawn background task to refresh cache periodically
-    let bw_clone = bw.clone();
-    let folder_clone = args.folder.clone();
-    let cache_clone = cache.clone();
-    let reconcile_interval = Duration::from_secs(args.reconcile_interval);
+/// Run the controller until `shutdown` resolves.
+pub async fn run(
+    client: Client,
+    sm: SecretsManager,
+    interval: Duration,
+    shutdown: impl Future<Output = ()> + Send + Sync + 'static,
+) {
+    let cache = Cache::default();
+    refresh(&sm, &cache).await;
 
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(reconcile_interval).await;
-
-            match bw_clone.get_secrets(&folder_clone).await {
-                Ok(new_secrets) => {
-                    let mut cache_guard = cache_clone.lock().unwrap();
-                    info!("refreshed cache with {} secrets", new_secrets.len());
-                    prometheus::CACHED_SECRETS.set(new_secrets.len() as i64);
-                    prometheus::CACHE_REFRESH_SUCCESS_TOTAL.inc();
-                    *cache_guard = new_secrets;
-                }
-                Err(e) => {
-                    warn!("failed to refresh secrets cache (even after re-login): {}", e);
-                    prometheus::CACHE_REFRESH_FAILURE_TOTAL.inc();
-                }
+    let refresher = tokio::spawn({
+        let cache = cache.clone();
+        async move {
+            let mut ticker = tokio::time::interval(interval);
+            ticker.tick().await; // first tick is immediate; we just refreshed
+            loop {
+                ticker.tick().await;
+                refresh(&sm, &cache).await;
             }
         }
     });
 
-    // Create a shutdown signal from the receiver
-    let _shutdown_signal = async move {
-        let _ = shutdown_rx.await;
-        info!("received shutdown signal, stopping controller...");
-    };
+    let ctx = Arc::new(Context {
+        client: client.clone(),
+        cache,
+        requeue_after: interval,
+        failures: Mutex::default(),
+    });
 
-    Controller::new(bitwarden_secrets, watcher::Config::default())
-        .shutdown_on_signal()
-        .run(
-            reconcile,
-            error_policy,
-            Arc::new(Data {
-                client,
-                cache,
-                reconcile_interval,
-                retry_counts: Arc::new(Mutex::new(HashMap::new())),
-            }),
-        )
-        .for_each(|res| async move {
-            match res {
-                Ok(o) => info!("reconciled {:?}", o),
-                Err(e) => warn!("reconcile failed: {:?}", e),
-            }
-        })
-        .await;
+    Controller::new(
+        Api::<BitwardenSecret>::all(client),
+        watcher::Config::default(),
+    )
+    .graceful_shutdown_on(shutdown)
+    .run(reconcile, error_policy, ctx)
+    .for_each(|res| async move {
+        if let Ok((obj, _)) = res {
+            info!(object = %obj, "reconciled");
+        }
+        // errors are already logged by error_policy
+    })
+    .await;
 
-    info!("controller stopped gracefully");
-    Ok(())
+    refresher.abort();
+    info!("controller stopped");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backoff_doubles_and_caps() {
+        assert_eq!(backoff(1), Duration::from_secs(10));
+        assert_eq!(backoff(2), Duration::from_secs(20));
+        assert_eq!(backoff(10), MAX_BACKOFF);
+        assert_eq!(backoff(u32::MAX), MAX_BACKOFF);
+    }
+
+    #[test]
+    fn login_ignores_key_and_note_uses_it() {
+        let login = Item::Login {
+            username: "u".into(),
+            password: "p".into(),
+        };
+        assert_eq!(
+            secret_data(&login, Some("ignored"))
+                .keys()
+                .collect::<Vec<_>>(),
+            ["password", "username"]
+        );
+        let note = Item::Note("v".into());
+        assert_eq!(secret_data(&note, None)["notes"], "v");
+        assert_eq!(
+            secret_data(&note, Some(".dockerconfigjson"))[".dockerconfigjson"],
+            "v"
+        );
+    }
 }

@@ -1,171 +1,157 @@
-pub mod bw;
-pub mod controller;
-pub mod prometheus;
-use crate::controller::BitwardenSecret;
-use anyhow::Result;
-use axum::{routing::get, Router};
+//! Kubernetes operator that syncs Bitwarden Secrets Manager secrets into
+//! `Secret`s, driven by `BitwardenSecret` resources.
+
+mod controller;
+mod metrics;
+mod sm;
+
+use anyhow::{Context, Result};
+use axum::{Router, routing::get};
 use clap::Parser;
+use controller::BitwardenSecret;
 use kube::{Client, CustomResourceExt};
 use kube_leader_election::{LeaseLock, LeaseLockParams, LeaseLockResult};
-use serde_json::Value;
-use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::{fs::File, io::Write, process, time::Duration};
+use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
+use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::oneshot;
 use tracing::{info, warn};
 
-#[derive(Parser, Debug, Clone)]
-#[clap(author, version, about, long_about = None)]
-pub struct Args {
-    #[clap(long, env, default_value = "kubernetes")]
-    folder: String,
-    #[clap(long, env, default_value_t = 60 * 5)]
-    reconcile_interval: u64,
-    #[clap(long, env, default_value_t = false)]
-    generate_crd: bool,
-    #[clap(long, env, default_value_t = 8000)]
-    metrics_port: u16,
-    #[clap(long, env)]
-    namespace: String, // set from downward API
-}
+const LEASE_TTL: Duration = Duration::from_secs(15);
+const LEASE_RENEW_EVERY: Duration = Duration::from_secs(5);
 
-fn write_file(path: String, content: String) -> std::io::Result<()> {
-    let mut file = File::create(path)?;
-    file.write_all(content.as_bytes())?;
-    Ok(())
+#[derive(Parser, Debug)]
+#[command(version, about)]
+struct Args {
+    /// Seconds between Secrets Manager refreshes and Secret re-applies.
+    #[arg(long, env, default_value_t = 300)]
+    reconcile_interval: u64,
+    /// Print the CRD as YAML and exit.
+    #[arg(long, env)]
+    generate_crd: bool,
+    /// Port for Prometheus `/metrics`.
+    #[arg(long, env, default_value_t = 8000)]
+    metrics_port: u16,
+    /// Namespace of the leader-election lease (use the downward API).
+    #[arg(long, env, required_unless_present = "generate_crd")]
+    namespace: Option<String>,
+    /// Name of the leader-election `Lease`. Give each install its own when
+    /// running several in one namespace.
+    #[arg(long, env, default_value = "bitwarden-secrets-operator")]
+    lease_name: String,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
-
-    let shutdown_requested = Arc::new(AtomicBool::new(false));
-    let shutdown_requested_ctrlc = shutdown_requested.clone();
-
-    ctrlc::set_handler(move || {
-        info!("received SIGINT, shutting down gracefully...");
-        shutdown_requested_ctrlc.store(true, Ordering::SeqCst);
-    })?;
-
     let args = Args::parse();
-    let hostname = gethostname::gethostname();
-    let client = Client::try_default().await?;
-    let metrics_port = args.metrics_port;
 
     if args.generate_crd {
-        // Generate and serialize the CRD
-        info!("writing crd...");
-        write_file(
-            "crd.yaml".to_string(),
-            serde_yaml::to_string(&BitwardenSecret::crd())?,
-        )?;
-        info!("done!");
-        process::exit(0);
+        print!("{}", serde_yaml::to_string(&BitwardenSecret::crd())?);
+        return Ok(());
     }
 
-    let leadership = LeaseLock::new(
-        kube::Client::try_default().await?,
-        &args.namespace,
+    // kube and the Bitwarden SDK both use rustls; pin the crypto provider so
+    // rustls never has to pick one
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .map_err(|_| anyhow::anyhow!("a rustls crypto provider was already installed"))?;
+
+    // read directly rather than via clap so it never shows up in `Args`' Debug output
+    let token = std::env::var("BWS_ACCESS_TOKEN").context("BWS_ACCESS_TOKEN is not set")?;
+    let namespace = args.namespace.context("--namespace is required")?;
+    let client = Client::try_default().await?;
+
+    let lease = LeaseLock::new(
+        client.clone(),
+        &namespace,
         LeaseLockParams {
-            holder_id: hostname.into_string().unwrap(),
-            lease_name: "bitwarden-secrets-operator".into(),
-            lease_ttl: Duration::from_secs(15),
+            holder_id: gethostname::gethostname().to_string_lossy().into_owned(),
+            lease_name: args.lease_name.clone(),
+            lease_ttl: LEASE_TTL,
         },
     );
-
-    info!("waiting for lock...");
-    loop {
-        let lease = leadership.try_acquire_or_renew().await?;
-        if matches!(lease, LeaseLockResult::Acquired(_)) {
-            break;
-        }
-        tokio::time::sleep(Duration::from_secs(5)).await;
+    info!("waiting for leader lease...");
+    while !matches!(
+        lease.try_acquire_or_renew().await?,
+        LeaseLockResult::Acquired(_)
+    ) {
+        tokio::time::sleep(LEASE_RENEW_EVERY).await;
     }
-    info!("acquired lock!");
+    info!("acquired leader lease");
 
-    // Create channels for graceful shutdown coordination
-    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
-    let shutdown_triggered = Arc::new(AtomicBool::new(false));
-    let shutdown_triggered_leader = shutdown_triggered.clone();
+    let sm = sm::SecretsManager::login(token).await?;
+    info!("logged in to Bitwarden Secrets Manager");
 
-    // start a background task to see if we're still leader
+    let listener = TcpListener::bind(("0.0.0.0", args.metrics_port)).await?;
+    info!("serving metrics on :{}", args.metrics_port);
     tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(Duration::from_secs(5)).await;
-            
-            if shutdown_triggered_leader.load(Ordering::SeqCst) {
-                break;
-            }
-            
-            let lease = match leadership.try_acquire_or_renew().await {
-                Ok(l) => l,
-                Err(e) => {
-                    warn!("background lease error: {}", e);
-                    continue;
-                }
-            };
-            if matches!(lease, LeaseLockResult::NotAcquired(_)) {
-                info!("lost lease, triggering graceful shutdown...");
-                let _ = shutdown_tx.send(());
-                break;
-            }
+        let app = Router::new().route("/metrics", get(metrics::gather));
+        if let Err(e) = axum::serve(listener, app).await {
+            warn!("metrics server stopped: {e}");
         }
     });
 
-    // login and get a session key
-    info!("login to bitwarden...");
-    let session = bw::BitwardenClient::login().await?;
-    info!("logged in to bitwarden");
-
-    info!("starting bitwarden-secrets-operator...");
-
-    // Create the shared cache
-    let cache = Arc::new(Mutex::new(HashMap::<String, Value>::new()));
-
-    let controller_handle = tokio::spawn(async move {
-        controller::run(client, args, session, cache, shutdown_rx).await
+    // the controller needs a Sync shutdown future, so watch lease + signals in
+    // a task and hand it the receiving end of a oneshot
+    let lost_lease = Arc::new(AtomicBool::new(false));
+    let (stop_tx, stop_rx) = oneshot::channel::<()>();
+    tokio::spawn({
+        let lost_lease = lost_lease.clone();
+        async move {
+            tokio::select! {
+                () = hold_lease(lease) => lost_lease.store(true, Ordering::SeqCst),
+                () = shutdown_signal() => info!("received shutdown signal"),
+            }
+            let _ = stop_tx.send(());
+        }
     });
 
-    info!("starting metrics http server...");
+    controller::run(
+        client,
+        sm,
+        Duration::from_secs(args.reconcile_interval),
+        async move {
+            let _ = stop_rx.await;
+        },
+    )
+    .await;
 
-    let app = Router::new().route("/metrics", get(prometheus::gather_metrics));
+    if lost_lease.load(Ordering::SeqCst) {
+        // exit non-zero so the restarted container rejoins as a follower
+        anyhow::bail!("lost the leader lease");
+    }
+    Ok(())
+}
 
-    let bind = format!("0.0.0.0:{}", metrics_port);
-    let listener = TcpListener::bind(&bind).await?;
-    info!("listening on {}", &bind);
-    
-    // Run both the controller and metrics server concurrently with shutdown support
-    tokio::select! {
-        result = axum::serve(listener, app) => {
-            result?;
-        }
-        result = controller_handle => {
-            match result {
-                Ok(Ok(())) => info!("controller task completed"),
-                Ok(Err(e)) => {
-                    warn!("controller task failed: {:#}", e);
-                    process::exit(1);
-                }
-                Err(e) => {
-                    warn!("controller task panicked: {}", e);
-                    process::exit(1);
-                }
+/// Keep renewing the lease; return once it is lost, or once renewals have
+/// failed for a full TTL (another replica may have taken over by then).
+async fn hold_lease(lease: LeaseLock) {
+    let mut last_renewed = Instant::now();
+    loop {
+        tokio::time::sleep(LEASE_RENEW_EVERY).await;
+        match lease.try_acquire_or_renew().await {
+            Ok(LeaseLockResult::Acquired(_)) => last_renewed = Instant::now(),
+            Ok(_) => {
+                warn!("leader lease taken by another replica");
+                return;
             }
-        }
-        _ = async {
-            loop {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                if shutdown_requested.load(Ordering::SeqCst) {
-                    break;
-                }
+            Err(e) if last_renewed.elapsed() >= LEASE_TTL => {
+                warn!("could not renew leader lease for {LEASE_TTL:?}: {e}");
+                return;
             }
-        } => {
-            info!("shutdown requested via SIGINT");
+            Err(e) => warn!("lease renewal failed, retrying: {e}"),
         }
     }
-    
-    Ok(())
+}
+
+/// Resolves on SIGTERM (pod shutdown) or SIGINT (Ctrl-C).
+async fn shutdown_signal() {
+    let mut term = signal(SignalKind::terminate()).expect("install SIGTERM handler");
+    tokio::select! {
+        _ = term.recv() => {}
+        _ = tokio::signal::ctrl_c() => {}
+    }
 }

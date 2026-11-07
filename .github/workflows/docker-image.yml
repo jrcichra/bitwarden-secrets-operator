@@ -1,108 +1,89 @@
-name: docker
+name: ci
 on:
   push:
-    branches:
-      - main
+    branches: [main]
+    tags: ["v*"]
   pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
 jobs:
-  build:
-    runs-on: ubuntu-22.04
+  check:
+    runs-on: ubuntu-24.04
     steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-      - name: Repo metadata
-        id: repo
-        uses: actions/github-script@v8
+      - uses: actions/checkout@v5
+      - run: rustup component add rustfmt clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --locked
+
+  # native runners per arch: no cross/QEMU
+  build:
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked
+      - uses: actions/upload-artifact@v4
         with:
-          script: |
-            return context.repo.repo
-      - name: Prepare
-        id: prep
+          name: bin-${{ matrix.arch }}
+          path: target/release/bitwarden-secrets-operator
+          retention-days: 1
+
+  image:
+    needs: [check, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bin-*
+      - name: Stage binaries
         run: |
-          DOCKER_IMAGE=ghcr.io/jrcichra/bitwarden-secrets-operator
-          VERSION=noop
-          if [ "${{ github.event_name }}" = "schedule" ]; then
-            VERSION=nightly
-          elif [[ $GITHUB_REF == refs/tags/* ]]; then
-            VERSION=${GITHUB_REF#refs/tags/}
-          elif [[ $GITHUB_REF == refs/heads/* ]]; then
-            VERSION=$(echo ${GITHUB_REF#refs/heads/} | sed -r 's#/+#-#g')
-            if [ "${{ github.event.repository.default_branch }}" = "$VERSION" ]; then
-              VERSION=latest
-            fi
-          elif [[ $GITHUB_REF == refs/pull/* ]]; then
-            VERSION=pr-${{ github.event.number }}
-          fi
-          TAGS="${DOCKER_IMAGE}:${VERSION}"
-          if [[ $VERSION =~ ^v[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
-            MINOR=${VERSION%.*}
-            MAJOR=${MINOR%.*}
-            TAGS="$TAGS,${DOCKER_IMAGE}:${MINOR},${DOCKER_IMAGE}:${MAJOR},${DOCKER_IMAGE}:latest"
-          elif [ "${{ github.event_name }}" = "push" ]; then
-            TAGS="$TAGS,${DOCKER_IMAGE}:sha-${GITHUB_SHA::8}"
-          fi
-          echo ::set-output name=version::${VERSION}
-          echo ::set-output name=tags::${TAGS}
-          echo ::set-output name=created::$(date -u +'%Y-%m-%dT%H:%M:%SZ')
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-      - name: Login to ghcr.io
-        uses: docker/login-action@v3
+          mkdir docker-bin
+          for arch in amd64 arm64; do
+            install -m 0755 bin-$arch/bitwarden-secrets-operator docker-bin/bitwarden-secrets-operator-$arch
+          done
+      - id: meta
+        uses: docker/metadata-action@v5
+        env:
+          DOCKER_METADATA_SHORT_SHA_LENGTH: 8 # image-gatherer resolves sha-<8 chars>
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,prefix=sha-,format=short,enable=${{ github.event_name == 'push' }}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=ref,event=pr
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        if: github.event_name != 'pull_request'
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: Swatinem/rust-cache@v2
-      - name: Build for aarch64
-        uses: houseabsolute/actions-rust-cross@v1
-        with:
-          force-use-cross: true
-          command: build
-          target: aarch64-unknown-linux-gnu
-          args: --release
-      - name: Build for x86_64
-        uses: houseabsolute/actions-rust-cross@v1
-        with:
-          force-use-cross: true
-          command: build
-          target: x86_64-unknown-linux-gnu
-          args: --release
-      - name: Prepare binaries for Docker
-        run: |
-          mkdir -p docker-bin
-          # Find and copy binaries (cross may place them in different locations)
-          echo "=== Finding binaries ==="
-          find target -name "bitwarden-secrets-operator" -type f
-          # Copy ARM64 binary
-          ARM64_BIN=$(find target -name "bitwarden-secrets-operator" -path "*aarch64*" -type f | head -1)
-          if [ -z "$ARM64_BIN" ]; then
-            echo "ERROR: ARM64 binary not found"
-            exit 1
-          fi
-          cp "$ARM64_BIN" docker-bin/bitwarden-secrets-operator-arm64
-          # Copy AMD64 binary
-          AMD64_BIN=$(find target -name "bitwarden-secrets-operator" -path "*x86_64*" -type f | head -1)
-          if [ -z "$AMD64_BIN" ]; then
-            echo "ERROR: AMD64 binary not found"
-            exit 1
-          fi
-          cp "$AMD64_BIN" docker-bin/bitwarden-secrets-operator-amd64
-          ls -lh docker-bin/
       - uses: docker/build-push-action@v6
         with:
           context: .
-          file: ./Dockerfile
           platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.prep.outputs.tags }}
-          labels: |
-            org.opencontainers.image.title=${{ fromJson(steps.repo.outputs.result).name }}
-            org.opencontainers.image.description=${{ fromJson(steps.repo.outputs.result).description }}
-            org.opencontainers.image.url=${{ fromJson(steps.repo.outputs.result).html_url }}
-            org.opencontainers.image.source=${{ fromJson(steps.repo.outputs.result).clone_url }}
-            org.opencontainers.image.version=${{ steps.prep.outputs.version }}
-            org.opencontainers.image.created=${{ steps.prep.outputs.created }}
-            org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.licenses=${{ fromJson(steps.repo.outputs.result).license.spdx_id }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}

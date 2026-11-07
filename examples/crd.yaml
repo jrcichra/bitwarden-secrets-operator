@@ -20,13 +20,19 @@ spec:
         description: Auto-generated derived type for BitwardenSecretSpec via `CustomResource`
         properties:
           spec:
+            description: |-
+              Materializes the Secrets Manager secret `spec.name` as a `Secret` with the
+              same name and namespace as this object.
             properties:
               key:
+                description: '`Secret` data key for a non-login value. Defaults to `notes`.'
                 nullable: true
                 type: string
               name:
+                description: Secrets Manager secret name.
                 type: string
               type:
+                description: '`Secret` type, e.g. `kubernetes.io/dockerconfigjson`.'
                 nullable: true
                 type: string
             required:

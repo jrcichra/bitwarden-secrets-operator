@@ -1,44 +1,29 @@
 # bitwarden-secrets-operator
 
 A Rust Kubernetes operator that turns `BitwardenSecret` resources into
-Kubernetes `Secret`s, using Bitwarden Password Manager items as the source of
-truth. It's a hobby project for a single homelabber per cluster, not for
-multi-tenant clusters: any namespace can request any item the operator can
-see.
+Kubernetes `Secret`s, with
+[Bitwarden Secrets Manager](https://bitwarden.com/products/secrets-manager/)
+as the source of truth. It talks to Secrets Manager through Bitwarden's
+official Rust SDK. It's a hobby project for a single homelabber per cluster,
+not for multi-tenant clusters: any namespace can request any secret the
+operator can see.
 
-## Security model: read this first
+## Security model
 
-The operator logs in with the Bitwarden CLI (`bw`), so it needs a **personal
-API key plus the master password**. Together they unlock the *entire* vault
-of that account. The folder filter (below) limits what gets synced; it doesn't
-limit what someone holding those credentials can read.
+The operator authenticates with a **machine account access token**. A machine
+account only sees the projects you grant it, so give it **read** access to one
+project that holds the cluster's secrets. The token can't reach your Password
+Manager vault or any other project, and you can revoke it on its own. One
+machine account per cluster lets you revoke clusters independently.
 
-Treat the `bitwarden-credentials` Secret as being as sensitive as your vault
-itself. If that's more exposure than you want, use a dedicated account for the
-cluster: share only the cluster items with it, read-only, through a free
-organization, and put them in that account's `kubernetes` folder. A leak then
-exposes only those items.
-
-If you want scoped, read-only, no-master-password access, look at
-[Bitwarden Secrets Manager](https://bitwarden.com/help/secrets-manager-kubernetes-operator/)
-or [External Secrets Operator](https://external-secrets.io/latest/provider/bitwarden-secrets-manager/)
-instead.
-
-Hardening that's already in `examples/operator.yaml`:
+Hardening in `examples/operator.yaml`:
 
 - **Write-only RBAC on Secrets** (`create`, `patch`). The operator can't list
-  or read the other Secrets in the cluster. Owner references clean up Secrets
-  when their `BitwardenSecret` is deleted.
-- **Non-root, read-only root filesystem, no capabilities, RuntimeDefault
-  seccomp.**
-- **RAM-backed `bw` state.** The CLI's cache (`data.json`, the encrypted
-  vault) lives in a `medium: Memory` emptyDir, never on node disk.
-- **Stable device ID** (`BW_DEVICE_ID`). Without it, every pod start is a new
-  CLI install with a random device ID, and Bitwarden emails a "new device
-  login" each time. A wrapper seeds `global_applicationId_appId` into
-  `data.json` before the first login. That key is internal `bw` state, so
-  check that it still matches after a CLI upgrade. Use one ID per cluster
-  (`uuidgen`).
+  or read the other Secrets in the cluster. Owner references clean up a Secret
+  when its `BitwardenSecret` is deleted.
+- **Distroless, non-root, read-only root filesystem, no capabilities,
+  RuntimeDefault seccomp.** The image is just the binary and CA certificates.
+- **No local state.** Secrets are held in memory only.
 
 Also worth doing yourself:
 
@@ -50,17 +35,19 @@ Also worth doing yourself:
 
 ## Install
 
-1. Generate a [personal API key](https://bitwarden.com/help/personal-api-key/)
-   and put the items you want synced in a `kubernetes` folder.
-2. Run `./login.sh` (read it first). It prompts for the client ID, client
-   secret and password, then creates the `bitwarden-credentials` Secret in the
-   `bitwarden-secrets-operator` namespace.
+1. In the Bitwarden web vault, open Secrets Manager for your organization (the
+   free plan covers 3 projects and 3 machine accounts). Create a project for
+   the cluster, then a machine account with **Can read** on that project, and
+   generate an access token.
+2. Run `./login.sh` (pass kubectl flags such as `--context home` if needed).
+   It prompts for the token and stores it as `BWS_ACCESS_TOKEN` in the
+   `bitwarden-credentials` Secret in the `bitwarden-secrets-operator`
+   namespace.
 3. Apply the CRD and the operator:
 
    ```sh
    kubectl apply -f examples/crd.yaml
-   # set BW_DEVICE_ID and pin the image first
-   kubectl apply -f examples/operator.yaml
+   kubectl apply -f examples/operator.yaml # pin the image first
    ```
 
 ## Usage
@@ -71,33 +58,45 @@ kind: BitwardenSecret
 metadata:
   name: google-credentials # name of the resulting Secret (same namespace)
 spec:
-  name: google # Bitwarden item name, inside the folder
-  key: notes # optional: key name for a secure note (default `notes`)
+  name: google # Secrets Manager secret name
+  key: notes # optional: data key for a plain value (default `notes`)
   type: Opaque # optional: Secret type, e.g. kubernetes.io/dockerconfigjson
 ```
 
-| Bitwarden item | Secret keys                              |
-| -------------- | ---------------------------------------- |
-| Login          | `username`, `password`                   |
-| Secure note    | `notes`, or whatever `spec.key` says     |
+| Secrets Manager value                          | Secret keys                         |
+| ---------------------------------------------- | ----------------------------------- |
+| exactly `{"username": "…", "password": "…"}`   | `username`, `password`              |
+| anything else                                  | `notes`, or whatever `spec.key` says |
 
-More examples are in `examples/object.yaml`.
+More examples are in `examples/object.yaml`. Changes in Secrets Manager reach
+the `Secret` within `RECONCILE_INTERVAL` seconds.
 
 ## Configuration
 
-| Env / flag           | Default      | Meaning                                         |
-| -------------------- | ------------ | ----------------------------------------------- |
-| `FOLDER`             | `kubernetes` | Bitwarden folder to sync items from             |
-| `RECONCILE_INTERVAL` | `300`        | Seconds between vault refreshes and re-applies  |
-| `METRICS_PORT`       | `8000`       | Prometheus `/metrics` port                      |
-| `NAMESPACE`          | (required)   | Namespace for the leader lease (downward API)   |
-| `BW_CLIENTID`, `BW_CLIENTSECRET`, `BW_PASSWORD` | (required) | Bitwarden login |
+| Env / flag           | Default                      | Meaning                                              |
+| -------------------- | ---------------------------- | ---------------------------------------------------- |
+| `BWS_ACCESS_TOKEN`   | (required)                   | Machine account access token                         |
+| `NAMESPACE`          | (required)                   | Namespace of the leader-election lease (downward API) |
+| `LEASE_NAME`         | `bitwarden-secrets-operator` | Name of the leader-election `Lease`                  |
+| `RECONCILE_INTERVAL` | `300`                        | Seconds between refreshes and `Secret` re-applies    |
+| `METRICS_PORT`       | `8000`                       | Prometheus `/metrics` port (served by the leader)    |
 
 Metrics: `last_reconcile`, `reconcile_success_total`,
 `reconcile_failure_total`, `cached_secrets`, `cache_refresh_success_total`,
 `cache_refresh_failure_total`.
 
+## Development
+
+```sh
+cargo clippy --all-targets && cargo test
+cargo run -- --generate-crd > examples/crd.yaml # after changing the CRD
+```
+
+CI builds native amd64 and arm64 binaries and publishes
+`ghcr.io/jrcichra/bitwarden-secrets-operator` with `latest` and
+`sha-<8-char commit>` tags.
+
 ## Disclaimer
 
-This is a hobby project and I can't guarantee the safety of your passwords.
-Use it at your own risk.
+This is a hobby project and I can't guarantee the safety of your secrets. Use
+it at your own risk.
