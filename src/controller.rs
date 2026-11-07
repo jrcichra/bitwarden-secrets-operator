@@ -3,7 +3,9 @@
 use crate::metrics;
 use crate::sm::{Item, SecretsManager};
 use futures::StreamExt;
+use k8s_openapi::ByteString;
 use k8s_openapi::api::core::v1::Secret;
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::{
     Client, CustomResource, Resource, ResourceExt,
     api::{Api, Patch, PatchParams},
@@ -24,14 +26,22 @@ use thiserror::Error;
 use tracing::{info, warn};
 
 const FIELD_MANAGER: &str = "bitwarden-secrets-operator.jrcichra.dev";
+const MANAGED_BY: (&str, &str) = ("app.kubernetes.io/managed-by", "bitwarden-secrets-operator");
 const DEFAULT_NOTE_KEY: &str = "notes";
 const MAX_BACKOFF: Duration = Duration::from_secs(300);
+const READY: &str = "Ready";
 
 /// Materializes the Secrets Manager secret `spec.name` as a `Secret` with the
 /// same name and namespace as this object.
 #[derive(CustomResource, Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
 #[kube(group = "jrcichra.dev", version = "v1", kind = "BitwardenSecret")]
-#[kube(shortname = "bws", namespaced)]
+#[kube(shortname = "bws", namespaced, status = "BitwardenSecretStatus")]
+#[kube(
+    printcolumn = r#"{"name":"Secret","type":"string","jsonPath":".spec.name"}"#,
+    printcolumn = r#"{"name":"Ready","type":"string","jsonPath":".status.conditions[?(@.type==\"Ready\")].status"}"#,
+    printcolumn = r#"{"name":"Reason","type":"string","jsonPath":".status.conditions[?(@.type==\"Ready\")].reason"}"#,
+    printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#
+)]
 pub struct BitwardenSecretSpec {
     /// Secrets Manager secret name.
     name: String,
@@ -40,6 +50,29 @@ pub struct BitwardenSecretSpec {
     /// `Secret` type, e.g. `kubernetes.io/dockerconfigjson`.
     #[serde(rename = "type")]
     type_: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
+pub struct BitwardenSecretStatus {
+    /// Standard conditions; `Ready` says whether the `Secret` is in sync.
+    #[serde(default)]
+    pub conditions: Vec<Condition>,
+}
+
+/// Same shape as `metav1.Condition`, so `kubectl wait --for=condition=Ready`
+/// works.
+#[derive(Debug, Serialize, Deserialize, Default, Clone, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Condition {
+    #[serde(rename = "type")]
+    pub type_: String,
+    /// `True` or `False`.
+    pub status: String,
+    pub reason: String,
+    pub message: String,
+    pub last_transition_time: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_generation: Option<i64>,
 }
 
 type Cache = Arc<Mutex<HashMap<String, Item>>>;
@@ -61,6 +94,17 @@ enum Error {
     Apply(#[source] kube::Error),
 }
 
+impl Error {
+    /// `reason` for the `Ready` condition.
+    fn reason(&self) -> &'static str {
+        match self {
+            Self::NotFound(_) => "NotFound",
+            Self::MissingField(_) => "InvalidObject",
+            Self::Apply(_) => "ApplyFailed",
+        }
+    }
+}
+
 /// 10s, 20s, 40s, ... capped at `MAX_BACKOFF`.
 fn backoff(failures: u32) -> Duration {
     Duration::from_secs(5)
@@ -69,19 +113,55 @@ fn backoff(failures: u32) -> Duration {
 }
 
 /// `Secret` data for an item.
-fn secret_data(item: &Item, key: Option<&str>) -> BTreeMap<String, String> {
+fn secret_data(item: &Item, key: Option<&str>) -> BTreeMap<String, ByteString> {
+    let entry = |k: &str, v: &str| (k.to_string(), ByteString(v.as_bytes().to_vec()));
     match item {
-        Item::Login { username, password } => BTreeMap::from([
-            ("username".to_string(), username.clone()),
-            ("password".to_string(), password.clone()),
-        ]),
-        Item::Note(value) => {
-            BTreeMap::from([(key.unwrap_or(DEFAULT_NOTE_KEY).to_string(), value.clone())])
+        Item::Login { username, password } => {
+            BTreeMap::from([entry("username", username), entry("password", password)])
         }
+        Item::Note(value) => BTreeMap::from([entry(key.unwrap_or(DEFAULT_NOTE_KEY), value)]),
     }
 }
 
-async fn reconcile(obj: Arc<BitwardenSecret>, ctx: Arc<Context>) -> Result<Action, Error> {
+/// The `Ready` condition to record, or `None` when the current one already
+/// says the same thing. Writing only on change keeps a status update from
+/// re-triggering reconciles forever.
+fn next_ready(
+    current: Option<&Condition>,
+    generation: Option<i64>,
+    outcome: Result<(), &Error>,
+    now: &str,
+) -> Option<Condition> {
+    let (status, reason, message) = match outcome {
+        Ok(()) => ("True", "Synced", String::new()),
+        Err(e) => ("False", e.reason(), e.to_string()),
+    };
+    let unchanged = current.is_some_and(|c| {
+        c.status == status
+            && c.reason == reason
+            && c.message == message
+            && c.observed_generation == generation
+    });
+    if unchanged {
+        return None;
+    }
+    let last_transition_time = match current {
+        Some(c) if c.status == status => c.last_transition_time.clone(),
+        _ => now.to_string(),
+    };
+    Some(Condition {
+        type_: READY.into(),
+        status: status.into(),
+        reason: reason.into(),
+        message,
+        last_transition_time,
+        observed_generation: generation,
+    })
+}
+
+/// Server-side apply the `Secret`. Content is deterministic, so re-applying an
+/// unchanged secret is a no-op and doesn't wake the owned-`Secret` watch.
+async fn apply_secret(obj: &BitwardenSecret, ctx: &Context) -> Result<(), Error> {
     let item = ctx
         .cache
         .lock()
@@ -100,18 +180,21 @@ async fn reconcile(obj: Arc<BitwardenSecret>, ctx: Arc<Context>) -> Result<Actio
         .controller_owner_ref(&())
         .ok_or(Error::MissingField("uid"))?;
 
-    let secret = json!({
-        "apiVersion": "v1",
-        "kind": "Secret",
-        "metadata": {
-            "name": name,
-            "namespace": namespace,
-            "ownerReferences": [owner],
-            "annotations": { "lastReconciled": chrono::Utc::now().to_rfc3339() },
+    let secret = Secret {
+        metadata: ObjectMeta {
+            name: Some(name.clone()),
+            namespace: Some(namespace.clone()),
+            owner_references: Some(vec![owner]),
+            labels: Some(BTreeMap::from([(
+                MANAGED_BY.0.to_string(),
+                MANAGED_BY.1.to_string(),
+            )])),
+            ..Default::default()
         },
-        "type": obj.spec.type_,
-        "stringData": secret_data(&item, obj.spec.key.as_deref()),
-    });
+        type_: obj.spec.type_.clone(),
+        data: Some(secret_data(&item, obj.spec.key.as_deref())),
+        ..Default::default()
+    };
 
     Api::<Secret>::namespaced(ctx.client.clone(), &namespace)
         .patch(
@@ -121,6 +204,43 @@ async fn reconcile(obj: Arc<BitwardenSecret>, ctx: Arc<Context>) -> Result<Actio
         )
         .await
         .map_err(Error::Apply)?;
+    Ok(())
+}
+
+async fn write_ready(obj: &BitwardenSecret, client: &Client, outcome: Result<(), &Error>) {
+    let current = obj
+        .status
+        .as_ref()
+        .and_then(|s| s.conditions.iter().find(|c| c.type_ == READY));
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let Some(ready) = next_ready(current, obj.metadata.generation, outcome, &now) else {
+        return;
+    };
+    let (Some(name), Some(namespace)) = (obj.metadata.name.as_deref(), obj.namespace()) else {
+        return;
+    };
+    let status = json!({
+        "apiVersion": BitwardenSecret::api_version(&()),
+        "kind": BitwardenSecret::kind(&()),
+        "status": { "conditions": [ready] },
+    });
+    if let Err(e) = Api::<BitwardenSecret>::namespaced(client.clone(), &namespace)
+        .patch_status(
+            name,
+            &PatchParams::apply(FIELD_MANAGER).force(),
+            &Patch::Apply(&status),
+        )
+        .await
+    {
+        // status is informational; don't fail the reconcile over it
+        warn!(object = %ObjectRef::from_obj(obj), "failed to update status: {e}");
+    }
+}
+
+async fn reconcile(obj: Arc<BitwardenSecret>, ctx: Arc<Context>) -> Result<Action, Error> {
+    let result = apply_secret(&obj, &ctx).await;
+    write_ready(&obj, &ctx.client, result.as_ref().map(|_| ())).await;
+    result?;
 
     ctx.failures
         .lock()
@@ -194,10 +314,15 @@ pub async fn run(
         failures: Mutex::default(),
     });
 
+    // watch only Secrets we made, so an edited or deleted one is put back at
+    // once (and the cache stays small)
+    let owned = watcher::Config::default().labels(&format!("{}={}", MANAGED_BY.0, MANAGED_BY.1));
+
     Controller::new(
-        Api::<BitwardenSecret>::all(client),
+        Api::<BitwardenSecret>::all(client.clone()),
         watcher::Config::default(),
     )
+    .owns(Api::<Secret>::all(client), owned)
     .graceful_shutdown_on(shutdown)
     .run(reconcile, error_policy, ctx)
     .for_each(|res| async move {
@@ -230,17 +355,46 @@ mod tests {
             username: "u".into(),
             password: "p".into(),
         };
-        assert_eq!(
-            secret_data(&login, Some("ignored"))
-                .keys()
-                .collect::<Vec<_>>(),
-            ["password", "username"]
-        );
+        let data = secret_data(&login, Some("ignored"));
+        assert_eq!(data.keys().collect::<Vec<_>>(), ["password", "username"]);
+        assert_eq!(data["username"].0, b"u");
+
         let note = Item::Note("v".into());
-        assert_eq!(secret_data(&note, None)["notes"], "v");
+        assert_eq!(secret_data(&note, None)["notes"].0, b"v");
         assert_eq!(
-            secret_data(&note, Some(".dockerconfigjson"))[".dockerconfigjson"],
-            "v"
+            secret_data(&note, Some(".dockerconfigjson"))[".dockerconfigjson"].0,
+            b"v"
         );
+    }
+
+    #[test]
+    fn ready_condition_only_changes_on_change() {
+        let err = Error::NotFound("x".into());
+
+        let first = next_ready(None, Some(1), Ok(()), "t1").expect("first write");
+        assert_eq!(
+            (first.status.as_str(), first.reason.as_str()),
+            ("True", "Synced")
+        );
+        assert_eq!(first.last_transition_time, "t1");
+
+        // same outcome again: no write (this is what prevents a hot loop)
+        assert_eq!(next_ready(Some(&first), Some(1), Ok(()), "t2"), None);
+
+        // new generation, still ready: write, but keep the transition time
+        let regen = next_ready(Some(&first), Some(2), Ok(()), "t3").expect("generation bump");
+        assert_eq!(regen.last_transition_time, "t1");
+
+        // ready -> not ready: write with a new transition time
+        let failed = next_ready(Some(&regen), Some(2), Err(&err), "t4").expect("transition");
+        assert_eq!(
+            (
+                failed.status.as_str(),
+                failed.reason.as_str(),
+                failed.last_transition_time.as_str()
+            ),
+            ("False", "NotFound", "t4")
+        );
+        assert_eq!(next_ready(Some(&failed), Some(2), Err(&err), "t5"), None);
     }
 }

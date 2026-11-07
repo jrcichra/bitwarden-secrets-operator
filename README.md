@@ -18,9 +18,12 @@ machine account per cluster lets you revoke clusters independently.
 
 Hardening in `examples/operator.yaml`:
 
-- **Write-only RBAC on Secrets** (`create`, `patch`). The operator can't list
-  or read the other Secrets in the cluster. Owner references clean up a Secret
-  when its `BitwardenSecret` is deleted.
+- **Narrow RBAC.** The operator needs `create`/`patch`/`list`/`watch` on
+  Secrets (to apply them and to restore one that's edited or deleted) and
+  `patch` on `bitwardensecrets/status`. It only watches Secrets carrying its
+  `app.kubernetes.io/managed-by` label, but RBAC can't express that, so
+  treat the service account as able to read Secrets cluster-wide. Owner
+  references clean up a Secret when its `BitwardenSecret` is deleted.
 - **Distroless, non-root, read-only root filesystem, no capabilities,
   RuntimeDefault seccomp.** The image is just the binary and CA certificates.
 - **No local state.** Secrets are held in memory only.
@@ -77,7 +80,18 @@ spec:
 | anything else                                  | `notes`, or whatever `spec.key` says |
 
 More examples are in `examples/object.yaml`. Changes in Secrets Manager reach
-the `Secret` within `RECONCILE_INTERVAL` seconds.
+the `Secret` within `RECONCILE_INTERVAL` seconds; a `Secret` that's edited or
+deleted by hand is put back immediately.
+
+Each `BitwardenSecret` reports a `Ready` condition:
+
+```console
+$ kubectl get bws -A
+NAMESPACE   NAME          SECRET        READY   REASON     AGE
+shed        shed-ark-db   shed-ark-db   True    Synced     2y
+searxng     api-key       api-key       False   NotFound   3d
+$ kubectl wait bws/shed-ark-db --for=condition=Ready
+```
 
 ## Configuration
 

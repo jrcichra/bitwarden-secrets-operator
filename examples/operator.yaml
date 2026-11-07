@@ -39,14 +39,18 @@ kind: ClusterRole
 metadata:
   name: bitwarden-secrets-operator
 rules:
-  # write-only: the operator server-side-applies Secrets and never reads them
-  # back. Deletes happen via ownerReferences garbage collection.
+  # list/watch is limited in practice to the operator's own Secrets by a
+  # label selector, but RBAC can't express that: treat this as cluster-wide
+  # Secret read (patch alone already returns a Secret's contents)
   - apiGroups: [""]
     resources: ["secrets"]
-    verbs: ["patch", "create"]
+    verbs: ["create", "patch", "list", "watch"]
   - apiGroups: ["jrcichra.dev"]
     resources: ["bitwardensecrets"]
-    verbs: ["get", "list", "watch", "patch"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["jrcichra.dev"]
+    resources: ["bitwardensecrets/status"]
+    verbs: ["patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

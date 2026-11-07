@@ -13,7 +13,19 @@ spec:
     singular: bitwardensecret
   scope: Namespaced
   versions:
-  - additionalPrinterColumns: []
+  - additionalPrinterColumns:
+    - jsonPath: .spec.name
+      name: Secret
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].reason
+      name: Reason
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
     name: v1
     schema:
       openAPIV3Schema:
@@ -38,10 +50,46 @@ spec:
             required:
             - name
             type: object
+          status:
+            nullable: true
+            properties:
+              conditions:
+                default: []
+                description: Standard conditions; `Ready` says whether the `Secret` is in sync.
+                items:
+                  description: |-
+                    Same shape as `metav1.Condition`, so `kubectl wait --for=condition=Ready`
+                    works.
+                  properties:
+                    lastTransitionTime:
+                      type: string
+                    message:
+                      type: string
+                    observedGeneration:
+                      format: int64
+                      nullable: true
+                      type: integer
+                    reason:
+                      type: string
+                    status:
+                      description: '`True` or `False`.'
+                      type: string
+                    type:
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+            type: object
         required:
         - spec
         title: BitwardenSecret
         type: object
     served: true
     storage: true
-    subresources: {}
+    subresources:
+      status: {}
