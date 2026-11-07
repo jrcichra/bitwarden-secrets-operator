@@ -37,6 +37,15 @@ pub static CACHE_REFRESH_FAILURE_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| 
     .expect("register cache_refresh_failure_total")
 });
 
+/// Register the counters up front, so they export 0 instead of being absent
+/// until their first increment. `last_reconcile` stays lazy: a 0 before the
+/// first reconcile would read as "stale for 56 years".
+pub fn init() {
+    LazyLock::force(&RECONCILE_FAILURE_TOTAL);
+    LazyLock::force(&CACHED_SECRETS);
+    LazyLock::force(&CACHE_REFRESH_FAILURE_TOTAL);
+}
+
 /// Axum handler for `/metrics`.
 pub async fn gather() -> String {
     TextEncoder::new()

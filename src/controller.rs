@@ -32,8 +32,10 @@ const READY: &str = "Ready";
 /// Retry delay after a failed reconcile or startup fetch.
 const RETRY: Duration = Duration::from_secs(60);
 /// Safety-net resync. Real changes arrive via the watches and via
-/// `reconcile_all_on` when a Secrets Manager refresh sees new content.
-const RESYNC: Duration = Duration::from_secs(3600);
+/// `reconcile_all_on` when a Secrets Manager refresh sees new content. Keep it
+/// well under an hour: a healthy idle operator only bumps `last_reconcile` on
+/// resync, and the stale-reconcile alert fires at an hour.
+const RESYNC: Duration = Duration::from_secs(1800);
 
 /// Materializes the Secrets Manager secret `spec.name` as a `Secret` with the
 /// same name and namespace as this object.

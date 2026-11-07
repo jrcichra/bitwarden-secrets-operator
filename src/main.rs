@@ -85,6 +85,7 @@ async fn main() -> Result<()> {
     let sm = sm::SecretsManager::login(token).await?;
     info!("logged in to Bitwarden Secrets Manager");
 
+    metrics::init();
     let listener = TcpListener::bind(("0.0.0.0", args.metrics_port)).await?;
     info!("serving metrics on :{}", args.metrics_port);
     tokio::spawn(async move {
