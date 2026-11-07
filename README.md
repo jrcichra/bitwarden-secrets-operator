@@ -13,18 +13,11 @@ API key plus the master password**. Together they unlock the *entire* vault
 of that account. The folder filter (below) limits what gets synced; it doesn't
 limit what someone holding those credentials can read.
 
-So **don't use your personal account.** Instead:
-
-1. Create a dedicated Bitwarden account for the cluster, with its own email
-   address and a long random password.
-2. Create a free organization, put your cluster secrets in a collection, and
-   give the bot account **read-only** access to that collection only. (Free
-   orgs allow 2 users.)
-3. In the bot account, put those items in the `kubernetes` folder.
-
-A leak then exposes only the cluster items, not your bank login. Bitwarden's
-"new device login" emails also go to the bot's inbox, so you can treat any
-such email on your *real* account as a real alert.
+Treat the `bitwarden-credentials` Secret as being as sensitive as your vault
+itself. If that's more exposure than you want, use a dedicated account for the
+cluster: share only the cluster items with it, read-only, through a free
+organization, and put them in that account's `kubernetes` folder. A leak then
+exposes only those items.
 
 If you want scoped, read-only, no-master-password access, look at
 [Bitwarden Secrets Manager](https://bitwarden.com/help/secrets-manager-kubernetes-operator/)
