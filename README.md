@@ -1,36 +1,110 @@
 # bitwarden-secrets-operator
 
-A Rust Kubernetes operator that reconciles `BitwardenSecrets` into `Secrets`.
+A Rust Kubernetes operator that turns `BitwardenSecret` resources into
+Kubernetes `Secret`s, using Bitwarden Password Manager items as the source of
+truth. It's a hobby project for a single homelabber per cluster, not for
+multi-tenant clusters: any namespace can request any item the operator can
+see.
 
-In other words, you can reference Bitwarden passwords from Kubernetes natively through `Secrets`.
+## Security model: read this first
 
-This is currently designed for a single customer/homelabber per cluster model, not a multi-tenant model, as there's no restriction on `BitwardenSecret` per namespace. It's made to be a step up for people who manage their secrets in Bitwarden and want to reference them in their personal Kubernetes cluster using GitOps.
+The operator logs in with the Bitwarden CLI (`bw`), so it needs a **personal
+API key plus the master password**. Together they unlock the *entire* vault
+of that account. The folder filter (below) limits what gets synced; it doesn't
+limit what someone holding those credentials can read.
 
-## Secret scope
+So **don't use your personal account.** Instead:
 
-By default, the operator will only reconcile secrets found in the `kubernetes` directory of your Bitwarden store. Limiting it to a folder reduces the likelyhood a `Secret` will be made with unintentional credentials. Unfortunately, Bitwarden falls short in API accounts, and all accounts have full access to all features. Ideally this operator would be limited to reading secrets in the `kubernetes` directory. Maybe this is possible with organizations? I'm not sure.
+1. Create a dedicated Bitwarden account for the cluster, with its own email
+   address and a long random password.
+2. Create a free organization, put your cluster secrets in a collection, and
+   give the bot account **read-only** access to that collection only. (Free
+   orgs allow 2 users.)
+3. In the bot account, put those items in the `kubernetes` folder.
 
-# Getting Started
+A leak then exposes only the cluster items, not your bank login. Bitwarden's
+"new device login" emails also go to the bot's inbox, so you can treat any
+such email on your *real* account as a real alert.
 
-To get started, audit and run `login.sh`, providing your Bitwarden API key as [described here](https://bitwarden.com/help/personal-api-key/#authenticate-using-your-api-key), and providing your password as required by [unlock](https://bitwarden.com/help/cli/#unlock-options).
-The script will create a `Secret` called `bitwarden-credentials`. The values within this secret will be referenced by `bitwarden-secrets-operator` to maintain a session with Bitwarden and require no human interaction.
+If you want scoped, read-only, no-master-password access, look at
+[Bitwarden Secrets Manager](https://bitwarden.com/help/secrets-manager-kubernetes-operator/)
+or [External Secrets Operator](https://external-secrets.io/latest/provider/bitwarden-secrets-manager/)
+instead.
 
-To protect your vault from a potential hacker's malicious build of `bitwarden-secrets-operator`, apply a `NetworkPolicy` so `bitwarden-secrets-operator` can only talk to the necessary Bitwarden API endpoints with something like an [Istio EgressRule](https://istio.io/v0.2/docs/reference/config/traffic-rules/egress-rules.html) if you're using Istio and the Kubernetes API. Also make sure other applications do not have a `ClusterRoleBinding` to view secrets and make sure your Kubernetes API is secured.
+Hardening that's already in `examples/operator.yaml`:
 
-# Usage
+- **Write-only RBAC on Secrets** (`create`, `patch`). The operator can't list
+  or read the other Secrets in the cluster. Owner references clean up Secrets
+  when their `BitwardenSecret` is deleted.
+- **Non-root, read-only root filesystem, no capabilities, RuntimeDefault
+  seccomp.**
+- **RAM-backed `bw` state.** The CLI's cache (`data.json`, the encrypted
+  vault) lives in a `medium: Memory` emptyDir, never on node disk.
+- **Stable device ID** (`BW_DEVICE_ID`). Without it, every pod start is a new
+  CLI install with a random device ID, and Bitwarden emails a "new device
+  login" each time. A wrapper seeds `global_applicationId_appId` into
+  `data.json` before the first login. That key is internal `bw` state, so
+  check that it still matches after a CLI upgrade. Use one ID per cluster
+  (`uuidgen`).
 
-See `examples/object.yaml` for examples.
+Also worth doing yourself:
 
-If you make a `login` secret in Bitwarden, this translates to a `Secret` with `username` and `password` keys.
+- Lock down egress with a NetworkPolicy so the pod can reach only DNS, the
+  Kubernetes API and Bitwarden (FQDN rules need Cilium, Istio or similar).
+- Make sure nothing else in the cluster can read Secrets cluster-wide, and
+  enable encryption at rest for Secrets in etcd.
+- Pin the image to a `sha-<commit>` tag instead of `latest`.
 
-If you make a `secure note` secret in Bitwarden, this translates to a `Secret` with a `notes` key, as it is described in their CLI output.
+## Install
 
-There are optional keys for `key` and `type`, which correlate to the fields on the `Secret`.
+1. Create the bot account as described above, and generate its
+   [personal API key](https://bitwarden.com/help/personal-api-key/).
+2. Run `./login.sh` (read it first). It prompts for the client ID, client
+   secret and password, then creates the `bitwarden-credentials` Secret in the
+   `bitwarden-secrets-operator` namespace.
+3. Apply the CRD and the operator:
 
-# Disclaimer
+   ```sh
+   kubectl apply -f examples/crd.yaml
+   # set BW_DEVICE_ID and pin the image first
+   kubectl apply -f examples/operator.yaml
+   ```
 
-This is a hobby project. I cannot guarantee the safety of your passwords with this solution. Use at your own risk.
+## Usage
 
-I'm using it in my homelab cluster to manage my secrets. It's currently satisfying my simple use cases.
+```yaml
+apiVersion: jrcichra.dev/v1
+kind: BitwardenSecret
+metadata:
+  name: google-credentials # name of the resulting Secret (same namespace)
+spec:
+  name: google # Bitwarden item name, inside the folder
+  key: notes # optional: key name for a secure note (default `notes`)
+  type: Opaque # optional: Secret type, e.g. kubernetes.io/dockerconfigjson
+```
 
-I know Rust enough to write code that compiles, but not much more than that. The code style will be rough.
+| Bitwarden item | Secret keys                              |
+| -------------- | ---------------------------------------- |
+| Login          | `username`, `password`                   |
+| Secure note    | `notes`, or whatever `spec.key` says     |
+
+More examples are in `examples/object.yaml`.
+
+## Configuration
+
+| Env / flag           | Default      | Meaning                                         |
+| -------------------- | ------------ | ----------------------------------------------- |
+| `FOLDER`             | `kubernetes` | Bitwarden folder to sync items from             |
+| `RECONCILE_INTERVAL` | `300`        | Seconds between vault refreshes and re-applies  |
+| `METRICS_PORT`       | `8000`       | Prometheus `/metrics` port                      |
+| `NAMESPACE`          | (required)   | Namespace for the leader lease (downward API)   |
+| `BW_CLIENTID`, `BW_CLIENTSECRET`, `BW_PASSWORD` | (required) | Bitwarden login |
+
+Metrics: `last_reconcile`, `reconcile_success_total`,
+`reconcile_failure_total`, `cached_secrets`, `cache_refresh_success_total`,
+`cache_refresh_failure_total`.
+
+## Disclaimer
+
+This is a hobby project and I can't guarantee the safety of your passwords.
+Use it at your own risk.
